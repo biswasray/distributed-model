@@ -15,6 +15,7 @@ Code: `src/common` (config, HTTP, sysinfo), `src/xi` (agent, process supervisor)
 | If you want to… | Read |
 |---|---|
 | Understand what the system is and why it's built this way | [Architecture overview](architecture/01-system-overview.md) |
+| Build, test, and run XGI/XI step by step | [HOW_TO_RUN.md](HOW_TO_RUN.md) |
 | Install, configure, and run the cluster | [Operator guide](distributed-qwen-cluster.md) |
 | Know what speed to expect | [Operator guide §11](distributed-qwen-cluster.md#11-performance-expectations) · [ADR-002](adr/ADR-002-pipeline-not-tensor-parallelism.md) |
 | Implement a component | [Component specs](#architecture) + [Protocols & data](architecture/05-protocols-and-data.md) |
