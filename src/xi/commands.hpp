@@ -45,11 +45,12 @@ std::optional<fs::path> resolve_model_path(const fs::path& models_dir, const std
 // All *.gguf files under models_dir (recursive), relative, '/'-separated, sorted.
 std::vector<std::string> scan_models(const fs::path& models_dir);
 
-// Program + args for a binary. A ".py" binary runs as `python <script> args...` (used for mocks).
+// Program + args for a binary. A ".py" binary runs as `python <script> args...` (python3 on POSIX).
 std::vector<std::string> program_argv(const fs::path& bin, const std::vector<std::string>& args);
 
-// Quotes one argument for a Windows command line (CommandLineToArgvW rules).
-std::wstring quote_windows_arg(const std::wstring& arg);
-std::wstring build_command_line(const std::vector<std::string>& argv);
+// Quotes one UTF-8 argument for a Windows command line (CommandLineToArgvW rules). The rules only
+// involve ASCII characters, so this works byte-wise on UTF-8. Used by the Windows process backend.
+std::string quote_windows_arg(const std::string& arg);
+std::string build_command_line(const std::vector<std::string>& argv);
 
 }  // namespace xi

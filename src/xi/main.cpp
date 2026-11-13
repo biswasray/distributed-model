@@ -1,22 +1,17 @@
-// xi.exe — XI (Extended Interface), the Qwen Cluster node agent. See architecture/02-node-agent.md.
-#include <windows.h>
-
+// xi — XI (Extended Interface), the Qwen Cluster node agent. See architecture/02-node-agent.md.
 #include <iostream>
+#include <set>
 
 #include "common/cli.hpp"
 #include "common/http_util.hpp"
 #include "common/log.hpp"
+#include "common/net.hpp"
+#include "common/platform.hpp"
+#include "common/shutdown.hpp"
 #include "common/util.hpp"
 #include "xi/agent.hpp"
 
 namespace {
-
-xi::Agent* g_agent = nullptr;
-
-BOOL WINAPI on_console_event(DWORD) {
-    if (g_agent) g_agent->request_shutdown();
-    return TRUE;
-}
 
 const char* kUsage = R"(xi - XI (Extended Interface): Qwen Cluster node agent
 
@@ -28,9 +23,9 @@ Usage: xi --coordinator http://<control-ip>:8100 [options]
   --port PORT              Agent API port (default 8200)
   --name NAME              node_id, unique in the cluster (default: hostname)
   --advertise-ip IP        IP other nodes use to reach this one (default: auto)
-  --llama-dir DIR          Folder with rpc-server.exe and llama-server.exe (default .\llama.cpp)
-  --models-dir DIR         Folder scanned recursively for *.gguf (default .\models)
-  --log-dir DIR            Agent and child process logs (default .\logs)
+  --llama-dir DIR          Folder with rpc-server and llama-server (default ./llama.cpp)
+  --models-dir DIR         Folder scanned recursively for *.gguf (default ./models)
+  --log-dir DIR            Agent and child process logs (default ./logs)
   --rpc-port PORT          rpc-server port (default 50052)
   --head-port PORT         llama-server port (default 8080)
   --rpc-server-bin PATH    Override rpc-server binary (.py runs with python)
@@ -49,7 +44,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (args.has("--version")) {
-        std::cout << "xi " << xgi::kVersion << "\n";
+        std::cout << "xi " << xgi::kVersion << " (" << xgi::kPlatformName << ")\n";
         return 0;
     }
     static const std::set<std::string> known = {
@@ -73,13 +68,13 @@ int main(int argc, char** argv) {
         o.port = args.get_int("--port", o.port);
         o.name = args.get_or("--name", "");
         o.advertise_ip = args.get_or("--advertise-ip", "");
-        o.llama_dir = xgi::widen(args.get_or("--llama-dir", ".\\llama.cpp"));
-        o.models_dir = xgi::widen(args.get_or("--models-dir", ".\\models"));
-        o.log_dir = xgi::widen(args.get_or("--log-dir", ".\\logs"));
+        if (auto v = args.get("--llama-dir")) o.llama_dir = xgi::path_from_utf8(*v);
+        if (auto v = args.get("--models-dir")) o.models_dir = xgi::path_from_utf8(*v);
+        if (auto v = args.get("--log-dir")) o.log_dir = xgi::path_from_utf8(*v);
         o.rpc_port = args.get_int("--rpc-port", o.rpc_port);
         o.head_port = args.get_int("--head-port", o.head_port);
-        if (auto v = args.get("--rpc-server-bin")) o.rpc_server_bin = xgi::widen(*v);
-        if (auto v = args.get("--llama-server-bin")) o.llama_server_bin = xgi::widen(*v);
+        if (auto v = args.get("--rpc-server-bin")) o.rpc_server_bin = xgi::path_from_utf8(*v);
+        if (auto v = args.get("--llama-server-bin")) o.llama_server_bin = xgi::path_from_utf8(*v);
         o.heartbeat_s = args.get_double("--heartbeat-s", o.heartbeat_s);
         if (o.heartbeat_s <= 0) throw std::invalid_argument("--heartbeat-s must be > 0");
     } catch (const std::exception& e) {
@@ -88,13 +83,11 @@ int main(int argc, char** argv) {
     }
 
     xgi::log::init("xi", o.log_dir, xgi::log::parse_level(args.get_or("--log-level", "info")));
-    xgi::ensure_winsock();
+    xgi::ensure_sockets();
 
     xi::Agent agent(o);
-    g_agent = &agent;
-    SetConsoleCtrlHandler(on_console_event, TRUE);
+    xgi::install_shutdown_handler([&agent] { agent.request_shutdown(); });
     bool ok = agent.run();
     agent.stop();
-    g_agent = nullptr;
     return ok ? 0 : 1;
 }

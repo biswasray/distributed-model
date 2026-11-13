@@ -1,8 +1,7 @@
 #include "common/util.hpp"
 
-#include <windows.h>
-
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <format>
@@ -20,10 +19,18 @@ double mono_now() {
 }
 
 std::optional<std::string> get_env(const char* name) {
-    wchar_t buf[32768];
-    DWORD n = GetEnvironmentVariableW(widen(name).c_str(), buf, static_cast<DWORD>(std::size(buf)));
-    if (n == 0 || n >= std::size(buf)) return std::nullopt;
-    return narrow(std::wstring_view(buf, n));
+#if defined(_MSC_VER)
+    char* buf = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&buf, &len, name) != 0 || !buf) return std::nullopt;
+    std::string v(buf);
+    free(buf);
+    return v;
+#else
+    const char* v = std::getenv(name);
+    if (!v) return std::nullopt;
+    return std::string(v);
+#endif
 }
 
 bool secure_equals(std::string_view a, std::string_view b) {
@@ -68,48 +75,34 @@ std::string join(const std::vector<std::string>& parts, std::string_view sep) {
     return out;
 }
 
-std::wstring widen(std::string_view utf8) {
-    if (utf8.empty()) return {};
-    int n = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
-    std::wstring out(static_cast<size_t>(n), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), out.data(), n);
-    return out;
-}
-
-std::string narrow(std::wstring_view wide) {
-    if (wide.empty()) return {};
-    int n = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
-    std::string out(static_cast<size_t>(n), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), n, nullptr, nullptr);
-    return out;
-}
-
 std::string format_number(double v) { return std::format("{}", v); }
 
-bool interruptible_sleep(std::stop_token st, double seconds) {
-    std::mutex mu;
-    std::condition_variable_any cv;
-    std::unique_lock lk(mu);
-    cv.wait_for(lk, st, std::chrono::duration<double>(seconds), [] { return false; });
-    return !st.stop_requested();
+bool StopToken::stop_requested() const {
+    if (!state_) return false;
+    std::lock_guard lk(state_->mu);
+    return state_->stopped;
 }
 
-void StopFlag::set() {
-    {
-        std::lock_guard lk(mu_);
-        set_ = true;
+bool StopToken::wait_for(double seconds) const {
+    if (!state_) {
+        std::mutex mu;
+        std::condition_variable cv;
+        std::unique_lock lk(mu);
+        cv.wait_for(lk, std::chrono::duration<double>(seconds), [] { return false; });
+        return false;
     }
-    cv_.notify_all();
+    std::unique_lock lk(state_->mu);
+    return state_->cv.wait_for(lk, std::chrono::duration<double>(seconds), [this] { return state_->stopped; });
 }
 
-bool StopFlag::is_set() const {
-    std::lock_guard lk(mu_);
-    return set_;
-}
+StopSource::StopSource() : state_(std::make_shared<StopToken::State>()) {}
 
-bool StopFlag::wait_for(double seconds) {
-    std::unique_lock lk(mu_);
-    return cv_.wait_for(lk, std::chrono::duration<double>(seconds), [this] { return set_; });
+void StopSource::request_stop() {
+    {
+        std::lock_guard lk(state_->mu);
+        state_->stopped = true;
+    }
+    state_->cv.notify_all();
 }
 
 }  // namespace xgi

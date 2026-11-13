@@ -1,7 +1,7 @@
-// xgi.exe — XGI (Extended General Intelligence): the Qwen Cluster core.
+// xgi — XGI (Extended General Intelligence): the Qwen Cluster core.
 // Runs the coordinator (:8100), the router (:8000), or both. See architecture/03 and 04.
-#include <windows.h>
-
+#include <algorithm>
+#include <format>
 #include <iostream>
 #include <memory>
 #include <thread>
@@ -10,6 +10,9 @@
 #include "common/config.hpp"
 #include "common/http_util.hpp"
 #include "common/log.hpp"
+#include "common/net.hpp"
+#include "common/platform.hpp"
+#include "common/shutdown.hpp"
 #include "common/util.hpp"
 #include "xgi/coordinator.hpp"
 #include "xgi/router.hpp"
@@ -17,11 +20,6 @@
 namespace {
 
 std::vector<httplib::Server*> g_servers;
-
-BOOL WINAPI on_console_event(DWORD) {
-    for (auto* s : g_servers) s->stop();
-    return TRUE;
-}
 
 const char* kUsage = R"(xgi - XGI (Extended General Intelligence): Qwen Cluster coordinator and router
 
@@ -33,8 +31,8 @@ Usage:
   xgi --version
 
 Common options:
-  --config PATH       cluster.yaml (default .\cluster.yaml)
-  --log-dir DIR       Log folder (default .\logs)
+  --config PATH       cluster.yaml (default ./cluster.yaml)
+  --log-dir DIR       Log folder (default ./logs)
   --log-level LEVEL   debug | info | warn | error (default info)
 
 The cluster token comes from env QWEN_CLUSTER_TOKEN, then cluster_token in cluster.yaml.
@@ -73,7 +71,7 @@ int check_config(const xgi::ClusterConfig& c) {
 int main(int argc, char** argv) {
     xgi::CliArgs args(argc, argv);
     if (args.has("--version")) {
-        std::cout << "xgi " << xgi::kVersion << "\n";
+        std::cout << "xgi " << xgi::kVersion << " (" << xgi::kPlatformName << ")\n";
         return 0;
     }
     if (args.has("--help") || args.has("-h") || args.positional().empty()) {
@@ -92,7 +90,7 @@ int main(int argc, char** argv) {
 
     xgi::ClusterConfig cfg;
     try {
-        cfg = xgi::load_config(xgi::widen(args.get_or("--config", "cluster.yaml")));
+        cfg = xgi::load_config(xgi::path_from_utf8(args.get_or("--config", "cluster.yaml")));
     } catch (const std::exception& e) {
         std::cerr << "xgi: " << e.what() << "\n";
         return 1;
@@ -118,9 +116,9 @@ int main(int argc, char** argv) {
     }
 
     std::string log_name = cmd == "serve" ? "xgi" : "xgi-" + cmd;
-    xgi::log::init(log_name, xgi::widen(args.get_or("--log-dir", ".\\logs")),
+    xgi::log::init(log_name, xgi::path_from_utf8(args.get_or("--log-dir", "logs")),
                    xgi::log::parse_level(args.get_or("--log-level", "info")));
-    xgi::ensure_winsock();
+    xgi::ensure_sockets();
     for (const auto& w : cfg.warnings) xgi::log::warn("config: {}", w);
     if (cfg.cluster_token.empty())
         xgi::log::warn("no cluster token set (QWEN_CLUSTER_TOKEN): control plane is UNAUTHENTICATED");
@@ -161,7 +159,9 @@ int main(int argc, char** argv) {
                        cfg.router.host, cfg.router.port, cfg.router.coordinator_url,
                        cfg.router.api_keys.empty() ? "OFF" : "on");
     }
-    SetConsoleCtrlHandler(on_console_event, TRUE);
+    xgi::install_shutdown_handler([] {
+        for (auto* s : g_servers) s->stop();
+    });
 
     if (coordinator) coordinator->start();
     if (router) router->start();

@@ -2,9 +2,9 @@
 #pragma once
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,27 +30,42 @@ bool ends_with_ci(std::string_view s, std::string_view suffix);
 std::vector<std::string> split(std::string_view s, char sep);
 std::string join(const std::vector<std::string>& parts, std::string_view sep);
 
-std::wstring widen(std::string_view utf8);
-std::string narrow(std::wstring_view wide);
-
 // Formats a double the shortest way that round-trips ("1", "0.5"), as llama.cpp expects.
 std::string format_number(double v);
 
-// Sleeps for `seconds` or until stop is requested. Returns false if stopped.
-bool interruptible_sleep(std::stop_token st, double seconds);
-
-// A flag a thread can wait on with a timeout (used for shutdown).
-class StopFlag {
+// Cooperative cancellation (a portable stand-in for std::stop_source / std::stop_token,
+// which older libc++ versions lack).
+class StopToken {
 public:
-    void set();
-    bool is_set() const;
-    // Waits up to `seconds`. Returns true if the flag was set.
-    bool wait_for(double seconds);
+    StopToken() = default;  // never stops
+    bool stop_requested() const;
+    // Waits up to `seconds`. Returns true if a stop was requested.
+    bool wait_for(double seconds) const;
 
 private:
-    mutable std::mutex mu_;
-    std::condition_variable cv_;
-    bool set_ = false;
+    friend class StopSource;
+    struct State {
+        std::mutex mu;
+        std::condition_variable cv;
+        bool stopped = false;
+    };
+    explicit StopToken(std::shared_ptr<State> s) : state_(std::move(s)) {}
+    std::shared_ptr<State> state_;
 };
+
+class StopSource {
+public:
+    StopSource();
+    void request_stop();
+    bool stop_requested() const { return token().stop_requested(); }
+    bool wait_for(double seconds) const { return token().wait_for(seconds); }
+    StopToken token() const { return StopToken(state_); }
+
+private:
+    std::shared_ptr<StopToken::State> state_;
+};
+
+// Sleeps for `seconds` or until stop is requested. Returns false if stopped.
+inline bool interruptible_sleep(const StopToken& st, double seconds) { return !st.wait_for(seconds); }
 
 }  // namespace xgi

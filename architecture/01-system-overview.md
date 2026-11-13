@@ -72,7 +72,7 @@ The Qwen cluster turns a fleet of ordinary Windows PCs on one Wi-Fi network into
 | `llama-server` | Head node of each group | 8080 | Inference, the first layer slice, HTTP completion API | external (llama.cpp) |
 | `rpc-server` | Worker nodes | 50052 | Remote compute backend holding a slice of layers | external (llama.cpp) |
 
-The control plane is implemented in C++ ([ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md)). **XGI** (`xgi.exe`, Extended General Intelligence) is the cluster core: the coordinator and router, run separately or together with `xgi serve`. **XI** (`xi.exe`, Extended Interface) is the node agent. Inference itself is always llama.cpp.
+The control plane is implemented in C++ ([ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md)) and runs on Windows, Linux and macOS ([ADR-008](../adr/ADR-008-cross-platform-build.md)). **XGI** (`xgi`, Extended General Intelligence) is the cluster core: the coordinator and router, run separately or together with `xgi serve`. **XI** (`xi`, Extended Interface) is the node agent. The fleet in this document is Windows, but the control machine or individual nodes may also be Linux or macOS. Keep each group on one OS. Inference itself is always llama.cpp.
 
 ## 6. Core concepts and vocabulary
 

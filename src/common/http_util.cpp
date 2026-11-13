@@ -1,10 +1,6 @@
 #include "common/http_util.hpp"
 
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
 #include <format>
-#include <mutex>
 
 #include "common/util.hpp"
 
@@ -112,45 +108,6 @@ HttpResult http_call(const std::string& method, const std::string& base_url, con
         out.error = std::format("HTTP {} {}", r->status, detail);
     }
     return out;
-}
-
-void ensure_winsock() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        WSADATA wsa;
-        WSAStartup(MAKEWORD(2, 2), &wsa);
-    });
-}
-
-bool tcp_probe(const std::string& host, int port, int timeout_ms) {
-    ensure_winsock();
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0) return false;
-    bool ok = false;
-    for (addrinfo* ai = res; ai && !ok; ai = ai->ai_next) {
-        SOCKET s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (s == INVALID_SOCKET) continue;
-        u_long nb = 1;
-        ioctlsocket(s, FIONBIO, &nb);
-        int rc = connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
-        if (rc == 0) {
-            ok = true;
-        } else if (WSAGetLastError() == WSAEWOULDBLOCK) {
-            fd_set wfds, efds;
-            FD_ZERO(&wfds);
-            FD_ZERO(&efds);
-            FD_SET(s, &wfds);
-            FD_SET(s, &efds);
-            timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
-            if (select(0, nullptr, &wfds, &efds, &tv) > 0 && FD_ISSET(s, &wfds)) ok = true;
-        }
-        closesocket(s);
-    }
-    freeaddrinfo(res);
-    return ok;
 }
 
 }  // namespace xgi

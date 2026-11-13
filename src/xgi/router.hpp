@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "common/config.hpp"
+#include "common/util.hpp"
 
 namespace xgi {
 
@@ -65,7 +66,7 @@ private:
 
     bool authorized(const httplib::Request& req, httplib::Response& res) const;
     void handle_proxy(const httplib::Request& req, httplib::Response& res);
-    void poll_loop(std::stop_token st);
+    void poll_loop(StopToken st);
 
     ClusterConfig cfg_;
     std::mutex mu_;
@@ -74,7 +75,8 @@ private:
     std::uint64_t next_ticket_ = 1;
     bool stopping_ = false;
     double last_poll_ok_mono_ = 0;
-    std::jthread poller_;
+    std::thread poller_;
+    StopSource poller_stop_;
 };
 
 }  // namespace xgi
