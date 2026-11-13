@@ -27,7 +27,7 @@ For one node: `GET http://<node-ip>:8200/logs/head?lines=200` (or `/logs/rpc`) w
 | Router **503 "model unavailable"** | No healthy group in the pool, or a typo in `model` | `/groups` for that pool | Fix the group (below), or use the right pool name from `/v1/models` |
 | Router **429** | Pool queue full | `/health` in-flight counts | More groups for that pool, lower `max_tokens`, or send traffic to a faster pool |
 | Router **502** | The head died mid-request | Head logs | See "group degraded" |
-| Node missing from `/nodes` | The agent isn't running, or the token or URL is wrong | `Get-ScheduledTask QwenNodeAgent`, `logs\node_agent.log` | Start the task. Check that `QWEN_CLUSTER_TOKEN` matches (401 errors in the agent log). |
+| Node missing from `/nodes` | The agent isn't running, or the token or URL is wrong | `Get-ScheduledTask QwenNodeAgent`, `logs\xi.log` | Start the task. Check that `QWEN_CLUSTER_TOKEN` matches (401 errors in the agent log). |
 | Node flapping alive/dead | Sleep, Wi-Fi roaming, or the power-saving adapter | Event Viewer, Wi-Fi signal | Turn off sleep, set the adapter to max performance, fix the AP |
 | Group **unplaced** | Not enough free nodes, no free node has `model_file`, or spares reserved | The `error` field | Stage the model on more nodes, lower `groups`, lower `spares` |
 | Group stuck **starting** | A worker's RPC port isn't reachable | `Test-NetConnection <worker> -Port 50052` | Firewall rule or profile (must be Private). Check the rpc-server log. |

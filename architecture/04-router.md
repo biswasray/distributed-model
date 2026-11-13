@@ -1,6 +1,6 @@
 # 04 · Router (API Gateway)
 
-> Component spec. A single instance, normally on the same machine as the coordinator. Port **8000**.
+> Component spec. A single instance, normally on the same machine as the coordinator. Port **8000**. Implemented by **XGI** (`xgi router` or `xgi serve`, [ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md)).
 
 ## 1. Responsibilities
 
@@ -43,7 +43,7 @@ request(model)
 - The request body is forwarded **unchanged** to `<head_url><same path>`. llama-server ignores `model`.
 - `stream: true` → response bytes (SSE `data:` lines) are relayed as they arrive. `stream: false` → the JSON is returned as is.
 - The upstream timeout is `request_timeout_s` (default 1800 s, because 72B answers can take many minutes).
-- When the client disconnects, the router **cancels the upstream request**, so llama-server frees the slot.
+- When the client disconnects, the router **cancels the upstream request**, so llama-server frees the slot. For streaming requests this happens within about 1 second. For `stream: false`, the disconnect is only noticed when llama-server finishes, which is another reason to use streaming on the slow pools.
 
 ### 4.2 Response headers added
 

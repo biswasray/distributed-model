@@ -14,6 +14,8 @@
 
 All control-plane bodies are JSON (`Content-Type: application/json`). Sizes are in **bytes** and times in **seconds** (as floats).
 
+Errors from every component (router, coordinator, agent) use the same body: `{"error": {"message": ..., "type": ..., "code": ...}}` (see §4). A missing or wrong `X-Cluster-Token` gets `401`.
+
 ## 2. Coordinator API
 
 ### `POST /register` (agent → coordinator)
@@ -32,9 +34,12 @@ All control-plane bodies are JSON (`Content-Type: application/json`). Sizes are 
   "cpu_logical": 12,
   "os": "Windows-11-10.0.26200-SP0",
   "models": ["Qwen3-30B-A3B-Q4_K_M.gguf"],
-  "processes": { "rpc": {"state": "stopped"}, "head": {"state": "stopped"} }
+  "processes": { "rpc": {"state": "stopped"}, "head": {"state": "stopped"} },
+  "agent_version": "0.1.0"
 }
 ```
+
+`agent_version` is optional (informational). The coordinator ignores fields it doesn't know.
 
 Response `200`: `{"ok": true, "heartbeat_interval_s": 5}`
 
@@ -51,7 +56,9 @@ Response `200`: `{"ok": true, "heartbeat_interval_s": 5}`
 }
 ```
 
-Responses: `200 {"ok": true}` · `404` for an unknown node (the agent must re-register).
+Responses: `200 {"ok": true}` · `404` for an unknown node, or a node already marked `dead` (the agent must re-register).
+
+Process `state` is `stopped` (never started, or stopped on request), `running`, or `exited` (it ended without being asked to). `pid` stays set for `exited`, so the coordinator can tell an old exit from the process it just started.
 
 ### `GET /groups` (router, operator → coordinator)
 

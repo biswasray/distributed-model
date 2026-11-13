@@ -1,0 +1,49 @@
+# Qwen Cluster configuration: read by `xgi coordinator`, `xgi router` and `xgi serve`.
+# Schema: architecture/05-protocols-and-data.md §5. Validate with: xgi check-config --config cluster.yaml
+# Layout: operator guide option D (hybrid), 48 nodes + 2 spares.
+
+cluster_token: ""            # better: set env QWEN_CLUSTER_TOKEN on every machine
+
+coordinator:
+  host: 0.0.0.0
+  port: 8100
+  heartbeat_interval_s: 5
+  node_timeout_s: 30
+  group_start_timeout_s: 7200
+
+router:
+  host: 0.0.0.0
+  port: 8000
+  coordinator_url: http://127.0.0.1:8100
+  max_queue: 100
+  queue_timeout_s: 600
+  request_timeout_s: 1800    # 72B answers can take many minutes
+  slots_per_group: 1
+  api_keys: []
+
+llama_cpp:
+  rpc_cache: true            # pass -c to rpc-server
+  extra_head_args: []        # appended to every llama-server
+
+pools:                       # filled in this order
+  - name: qwen3-30b-a3b      # = the client "model" field
+    model_file: Qwen3-30B-A3B-Q4_K_M.gguf   # RELATIVE to each head's models dir
+    nodes_per_group: 3
+    groups: 10
+    context: 4096
+
+  - name: qwen-72b
+    model_file: qwen2.5-72b-instruct-q4_k_m-00001-of-00012.gguf
+    nodes_per_group: 8
+    groups: 1
+    context: 2048
+
+  - name: qwen-7b
+    model_file: qwen2.5-7b-instruct-q4_k_m.gguf
+    nodes_per_group: 1
+    groups: 10
+    context: 8192
+
+spares: 2                    # nodes kept free for failover
+
+pinned: []                   # e.g. [{host: LAB-PC-01, role: head, pool: qwen-72b}]

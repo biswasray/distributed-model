@@ -10,6 +10,7 @@ Each ADR records one significant decision: its context, what was decided, and th
 | [ADR-004](ADR-004-shared-cluster-token.md) | Shared cluster token for control-plane auth | Accepted |
 | [ADR-005](ADR-005-model-files-relative-to-models-dir.md) | Model files pre-staged on heads, referenced by relative path | Accepted |
 | [ADR-006](ADR-006-in-memory-coordinator-state.md) | Coordinator state kept in memory only | Accepted |
+| [ADR-007](ADR-007-cpp-implementation-xgi-xi.md) | Implement the control plane in C++ as XGI and XI | Accepted |
 
 ## Template
 

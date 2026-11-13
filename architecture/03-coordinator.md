@@ -1,6 +1,6 @@
 # 03 · Coordinator
 
-> Component spec. A single instance on the control machine. Port **8100**.
+> Component spec. A single instance on the control machine. Port **8100**. Implemented by **XGI** (`xgi coordinator` or `xgi serve`, [ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md)).
 
 ## 1. Responsibilities
 
@@ -38,7 +38,7 @@ All state lives **in memory** ([ADR-006](../adr/ADR-006-in-memory-coordinator-st
 | `status` | See §3 |
 | `head_url` | `http://<head ip>:<head_port>` |
 | `slots` | The pool's `parallel` value (concurrent requests per group) |
-| `error` | Last failure reason, for operators |
+| `error` | Last failure reason, for operators. It stays set while the group restarts and clears when the group is `healthy`. |
 | `started_at`, `healthy_at` | Timestamps |
 
 ## 3. Group state machine
@@ -111,6 +111,8 @@ Design notes:
 
 **Stopping a group** sends `POST /stop {role: all}` to every member, ignores errors, and frees the members.
 
+A process failure is judged against the **pid the coordinator started**. An `exited` state with that pid counts. So does a heartbeat received more than 2 seconds after the start that shows the role not `running`, or running with a different pid (for example, after the agent restarted).
+
 ## 6. Failure handling
 
 A monitor loop runs every `heartbeat_interval_s`:
@@ -129,7 +131,11 @@ A monitor loop runs every `heartbeat_interval_s`:
 3. Re-run placement for this one group (spares are now usable).
 4. Start it again (§5). If placement fails, the group becomes `unplaced`.
 
-A node that comes back after being marked dead re-registers and joins `free`. It doesn't automatically return to its old group.
+A node that comes back after being marked dead gets `404` on its next heartbeat, re-registers, and joins `free`. It doesn't automatically return to its old group.
+
+**Repair backoff.** The first repair of a group starts immediately. If the group fails again before it reaches `healthy`, the next repair waits `heartbeat_interval_s × 2^(n−1)`, up to 300 seconds. This stops a broken model file or a crashing head from looping hot.
+
+**Unplaced groups.** A group left `unplaced` by a failed repair may use the spares when it is retried. A group that was never placed keeps the spares free.
 
 ## 7. API
 
@@ -142,7 +148,7 @@ A node that comes back after being marked dead re-registers and joins `free`. It
 | GET | `/groups` | router, operator | All groups with status, `head_url`, `slots` |
 | POST | `/deploy` | operator | Plan and start every pool. Returns 409 if already deployed, unless `?force=true` (which undeploys first). |
 | POST | `/undeploy` | operator | Stop every group |
-| POST | `/groups/{id}/restart` | operator | Stop and start one group with the same members, if they're all alive |
+| POST | `/groups/{id}/restart` | operator | Stop and start one group with the same members, if they're all alive. Otherwise the group is repaired, which re-places it. |
 | POST | `/drain/{node_id}` | operator | Exclude the node from placement. If it's in a group, the group is repaired without it. |
 | POST | `/undrain/{node_id}` | operator | Make the node eligible again |
 
@@ -150,9 +156,9 @@ Every endpoint except `/health` requires `X-Cluster-Token`. Schemas are in [05-p
 
 ## 8. Concurrency rules
 
-- One `asyncio.Lock` protects placement, so two repairs can never claim the same free node.
-- Each group has at most one lifecycle task. A new start or repair cancels and replaces the old one.
-- Calls to agents use timeouts (10 s), so one unreachable agent can't block the monitor loop.
+- One mutex protects all registry and group state, including placement, so two repairs can never claim the same free node. It is never held during a network call.
+- Each group has at most one lifecycle task (a thread). A new start or repair cancels the old one and **waits for it to finish**, so an old in-flight call can't land after the new task's `/stop`.
+- Calls to agents use timeouts: 10 s in general, 30 s for `/rpc/start` and `/head/start` (a restart first stops the old process, with up to 15 s grace), and 40 s for `/stop`. Head health checks run in parallel with a 5 s timeout, so one unreachable node can't block the monitor loop.
 
 ## 9. Restart behaviour
 

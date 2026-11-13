@@ -1,6 +1,6 @@
 # 02 · Node Agent
 
-> Component spec. Runs on **every** node. Port **8200**.
+> Component spec. Runs on **every** node. Port **8200**. Implemented by **XI** (`xi.exe`, [ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md)).
 
 ## 1. Responsibilities
 
@@ -27,8 +27,9 @@ The agent has **no scheduling logic**. It never decides on its own to start or s
 | `--log-dir` | `.\logs` | Agent and child process logs |
 | `--rpc-port` | `50052` | Port `rpc-server` listens on |
 | `--head-port` | `8080` | Port `llama-server` listens on |
-| `--rpc-server-bin` / `--llama-server-bin` | — | Override the binary paths. A `.py` path runs with the agent's Python interpreter, which lets tests use mock binaries. |
+| `--rpc-server-bin` / `--llama-server-bin` | — | Override the binary paths. Tests use `mock-rpc-server.exe` / `mock-llama-server.exe`. A `.py` path runs with `python` from `PATH`. |
 | `--heartbeat-s` | `5` | Heartbeat interval |
+| `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
 The agent reports its port overrides in its registration, so several agents can run on one machine during development.
 
@@ -85,10 +86,10 @@ llama-server -m <models_dir>/<model_file> --host 0.0.0.0 --port <head_port>
 |---|---|
 | One process per role | Starting a role that is already running stops the old process first (restart semantics). |
 | Graceful stop | Terminate, wait up to 15 seconds, then kill. |
-| Output capture | stdout and stderr are merged, appended to `logs\<role>.log`, and the last 500 lines are kept in memory. |
-| Windows specifics | Children start with `CREATE_NEW_PROCESS_GROUP`, so console signals don't spread to the agent. |
-| Exit detection | The heartbeat reports `state: exited` with `exit_code`. The **coordinator** decides what to do about it. |
-| Agent shutdown | All children are stopped (both in the lifespan shutdown and in `atexit`). |
+| Output capture | stdout and stderr are merged, appended to `logs\<role>.log`, and the last 500 lines are kept in memory. The agent's own log is `logs\xi.log`. |
+| Windows specifics | Children start with `CREATE_NEW_PROCESS_GROUP`, so console signals don't spread to the agent. "Terminate" is `CTRL_BREAK` when the agent has a console, and otherwise a hard kill. Each child runs in a kill-on-close **job object**, so it dies with the agent even if the agent crashes. |
+| Exit detection | The heartbeat reports `state: exited` with `pid` and `exit_code`. A process stopped on request reports `stopped`. The **coordinator** decides what to do about it. |
+| Agent shutdown | All children are stopped on Ctrl+C or console close, and by the job object if the agent dies. |
 
 ## 6. Safety constraints
 

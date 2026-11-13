@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| **Status** | Design / proposed. The coordinator and router code is not built yet. |
+| **Status** | Implemented in C++ as **XGI** (`xgi.exe`: coordinator + router) and **XI** (`xi.exe`: node agent). See [ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md). Not yet benchmarked on real hardware. |
 | **Target hardware** | 50 × Windows PCs, ~8 GB free RAM each, ≥300 MB GPU (not used), connected over Wi-Fi |
 | **Target models** | Qwen2.5-72B-Instruct, Qwen3-30B-A3B (MoE), Qwen2.5-7B-Instruct |
 | **Inference engine** | [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` + `rpc-server`) |
@@ -194,9 +194,9 @@ Mix the options behind the same router and pick the model per request with the `
 
 ### 6.1 Node Agent (on every machine)
 
-A small Python service (`node_agent.py`, port **8200**) that:
+**XI** (`xi.exe`, port **8200**), a single native executable that:
 
-- reports hardware to the coordinator at startup: hostname, IP, free RAM, CPU cores, and llama.cpp version;
+- reports hardware to the coordinator at startup: hostname, IP, free RAM, CPU cores, and the GGUF files in its models folder;
 - sends a **heartbeat** every 5 seconds;
 - starts and stops `rpc-server` or `llama-server` when the coordinator asks;
 - reports local model shards and cache state.
@@ -236,7 +236,7 @@ llama-server.exe `
 
 ### 6.4 Coordinator
 
-A Python service (`coordinator.py`, port **8100**) that:
+Part of **XGI** (`xgi coordinator`, port **8100**). It:
 
 - keeps the **node registry** (alive or dead, resources, assigned role);
 - assigns nodes to groups from `cluster.yaml` (section 8), preferring nodes with more RAM as heads;
@@ -245,14 +245,14 @@ A Python service (`coordinator.py`, port **8100**) that:
 
 ### 6.5 Router / API gateway
 
-A Python FastAPI service (`router.py`, port **8000**) that:
+Part of **XGI** (`xgi router`, port **8000**). It:
 
 - exposes an OpenAI-compatible API (section 10);
 - maps the `model` name to a pool, then routes to the **least-busy healthy group**;
 - queues requests when every group is busy, with a configurable maximum queue length and timeout;
 - streams responses with Server-Sent Events.
 
-The coordinator and router can run on the same machine. Ideally that machine has a **wired** connection to the access point.
+The coordinator and router can run on the same machine, in one process with `xgi serve`. Ideally that machine has a **wired** connection to the access point.
 
 ---
 
@@ -261,7 +261,7 @@ The coordinator and router can run on the same machine. Ideally that machine has
 ### 7.1 Prerequisites (all nodes)
 
 - Windows 10/11 64-bit
-- Python 3.11+ (for the agent, coordinator, and router)
+- No runtime to install: `xi.exe` and `xgi.exe` are self-contained (static C++ runtime)
 - Free disk space: **50 GB** on head nodes for 72B, **20 GB** for MoE heads, and space for each worker's cached shard
 - A **static IP or DHCP reservation** for every node (set this on the router or access point)
 - All nodes on the **same subnet**
@@ -302,22 +302,30 @@ To save Wi-Fi bandwidth, download once to a USB drive or a wired machine and cop
 
 ### 7.5 Install the cluster services
 
+Build once, on any Windows machine with Visual Studio 2022 or later (the "Desktop development with C++" workload) and internet access for the first configure:
+
 ```powershell
-cd C:\qwen-cluster
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+cmake --preset vs
+cmake --build --preset release
+ctest --preset release                      # unit + end-to-end tests (mock llama.cpp)
+cmake --install build\vs --config Release --prefix C:\qwen-cluster
 ```
+
+This puts `bin\xi.exe`, `bin\xgi.exe`, `cluster.yaml` (an example) and `scripts\install-xi-task.ps1` under `C:\qwen-cluster`. Copy that folder to every node. Nodes only need `bin\xi.exe` and the script. The control machine needs `bin\xgi.exe` and `cluster.yaml`.
+
+> If Windows **Smart App Control** or WDAC blocks the unsigned executables, sign them or allow them through your policy. Until it has checked a newly built file, Smart App Control blocks it with "An Application Control policy has blocked this file".
 
 ### 7.6 Run the node agent as a startup service
 
-Register the agent to start at boot with Task Scheduler:
+Set the token as a machine environment variable, then register XI to start at boot with Task Scheduler. Run this in an **elevated** PowerShell:
 
 ```powershell
-$action  = New-ScheduledTaskAction -Execute "C:\qwen-cluster\venv\Scripts\python.exe" -Argument "C:\qwen-cluster\node_agent.py --coordinator http://192.168.1.10:8100 --llama-dir C:\qwen-cluster\llama.cpp --models-dir C:\qwen-cluster\models"
-$trigger = New-ScheduledTaskTrigger -AtStartup
-Register-ScheduledTask -TaskName "QwenNodeAgent" -Action $action -Trigger $trigger -RunLevel Highest -User "SYSTEM"
+[Environment]::SetEnvironmentVariable('QWEN_CLUSTER_TOKEN', '<long random string>', 'Machine')
+C:\qwen-cluster\scripts\install-xi-task.ps1 -Coordinator http://192.168.1.10:8100
+Start-ScheduledTask -TaskName QwenNodeAgent
 ```
+
+The script registers `C:\qwen-cluster\bin\xi.exe --coordinator ... --llama-dir C:\qwen-cluster\llama.cpp --models-dir C:\qwen-cluster\models --log-dir C:\qwen-cluster\logs` as the `QwenNodeAgent` task (at startup, as SYSTEM, restarted if it exits). Run `xi --help` to see every flag.
 
 ---
 
@@ -343,10 +351,9 @@ router:
   request_timeout_s: 1800      # 72B answers can take many minutes
 
 llama_cpp:
-  path: C:\qwen-cluster\llama.cpp
-  rpc_port: 50052
-  head_port: 8080
-  threads: auto                # = physical cores
+  rpc_cache: true              # pass -c to rpc-server
+  extra_head_args: []          # appended to every llama-server
+# The llama.cpp folder, ports and threads are per-node xi.exe flags (--llama-dir, --rpc-port, --head-port).
 
 pools:
   - name: qwen3-30b-a3b
@@ -391,22 +398,24 @@ pinned:
 ### 9.1 Startup order
 
 1. Power on all nodes. The agents start automatically and register with the coordinator.
-2. Start the coordinator:
+2. Check the config, then start the coordinator (or `xgi serve`, which runs the coordinator and the router together):
    ```powershell
-   python coordinator.py --config cluster.yaml
+   cd C:\qwen-cluster
+   .\bin\xgi.exe check-config --config cluster.yaml
+   .\bin\xgi.exe coordinator --config cluster.yaml
    ```
 3. Check that all nodes are registered:
    ```powershell
-   curl http://192.168.1.10:8100/nodes
+   curl.exe -H "X-Cluster-Token: $env:QWEN_CLUSTER_TOKEN" http://192.168.1.10:8100/nodes
    ```
 4. Deploy the pools. Workers start first, then heads load their models:
    ```powershell
-   curl -X POST http://192.168.1.10:8100/deploy
+   curl.exe -X POST -H "X-Cluster-Token: $env:QWEN_CLUSTER_TOKEN" http://192.168.1.10:8100/deploy
    ```
    > ⏱ **The first deployment is slow.** Weights stream to workers over Wi-Fi, which can take 30–60+ minutes for 72B. Later starts read from each worker's local cache (`-c`) and take a few minutes.
 5. Start the router:
    ```powershell
-   python router.py --config cluster.yaml
+   .\bin\xgi.exe router --config cluster.yaml
    ```
 
 ### 9.2 Quick test
@@ -530,7 +539,7 @@ Adding more machines to a group **doesn't** shrink the first term. The same 47 G
 ## 12. Monitoring and operations
 
 - **Dashboard:** `GET /groups` on the coordinator shows each group's health and load. You can connect it to Grafana or poll it with a script.
-- **Logs:** each agent writes to `C:\qwen-cluster\logs\node_agent.log`, and each head writes llama-server output to `C:\qwen-cluster\logs\head_<pool>_<group>.log`.
+- **Logs:** each agent writes to `C:\qwen-cluster\logs\xi.log`, and its llama.cpp output goes to `logs\head.log` or `logs\rpc.log`. The last 500 lines are also available from `GET /logs/{role}` on the agent. On the control machine, XGI writes `logs\xgi-coordinator.log` and `logs\xgi-router.log` (or `logs\xgi.log` for `xgi serve`).
 - **Failover:** when a node stops sending heartbeats, the coordinator marks its group *degraded*, drains in-flight requests, replaces the node with a spare, and restarts the group.
 - **Maintenance:** call `POST /drain/{host}` before rebooting or updating a machine.
 - **Upgrades:** update llama.cpp on **all nodes at the same time**. Mixed versions can break RPC.

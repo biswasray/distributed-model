@@ -41,13 +41,13 @@ The Qwen cluster turns a fleet of ordinary Windows PCs on one Wi-Fi network into
 
 ```
                          ┌───────────────────────────────┐
-   Clients ──HTTP:8000──►│ Router  (FastAPI)             │
+   Clients ──HTTP:8000──►│ Router  (XGI, xgi.exe)        │
                          │  pool lookup · least-busy     │
                          │  queue · SSE streaming        │
                          └──────┬──────────────▲─────────┘
                proxied request  │              │ GET /groups (poll 3 s)
                                 │       ┌──────┴─────────────────────────┐
-                                │       │ Coordinator (FastAPI) :8100    │
+                                │       │ Coordinator (XGI) :8100        │
                                 │       │  node registry · placement     │
                                 │       │  group lifecycle · failover    │
                                 │       └──────▲──────────────┬──────────┘
@@ -66,11 +66,13 @@ The Qwen cluster turns a fleet of ordinary Windows PCs on one Wi-Fi network into
 
 | Component | Runs on | Port | Responsibility | Spec |
 |---|---|---|---|---|
-| Router | 1 machine (wired, if possible) | 8000 | Public API, routing, queueing, streaming | [04-router.md](04-router.md) |
-| Coordinator | Same machine as the router | 8100 | Cluster state, placement, lifecycle, failover | [03-coordinator.md](03-coordinator.md) |
-| Node Agent | Every node | 8200 | Registers the node, sends heartbeats, supervises llama.cpp processes | [02-node-agent.md](02-node-agent.md) |
+| Router (`xgi router`) | 1 machine (wired, if possible) | 8000 | Public API, routing, queueing, streaming | [04-router.md](04-router.md) |
+| Coordinator (`xgi coordinator`) | Same machine as the router | 8100 | Cluster state, placement, lifecycle, failover | [03-coordinator.md](03-coordinator.md) |
+| Node Agent (`xi.exe`) | Every node | 8200 | Registers the node, sends heartbeats, supervises llama.cpp processes | [02-node-agent.md](02-node-agent.md) |
 | `llama-server` | Head node of each group | 8080 | Inference, the first layer slice, HTTP completion API | external (llama.cpp) |
 | `rpc-server` | Worker nodes | 50052 | Remote compute backend holding a slice of layers | external (llama.cpp) |
+
+The control plane is implemented in C++ ([ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md)). **XGI** (`xgi.exe`, Extended General Intelligence) is the cluster core: the coordinator and router, run separately or together with `xgi serve`. **XI** (`xi.exe`, Extended Interface) is the node agent. Inference itself is always llama.cpp.
 
 ## 6. Core concepts and vocabulary
 

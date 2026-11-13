@@ -29,7 +29,7 @@ Walk the user through these steps in order. Ask which role the machine will have
 
 1. Create `C:\qwen-cluster\` with the subfolders `llama.cpp\`, `models\`, `logs\`.
 2. llama.cpp: download the official Windows CPU release from GitHub and extract it to `C:\qwen-cluster\llama.cpp\`. **Use the same release tag as every other node.** Check that `rpc-server.exe` and `llama-server.exe` are there.
-3. Python 3.11+ (only needed for the agent). Copy the cluster services and install their dependencies into a venv (see the operator guide §7.5).
+3. Copy `bin\xi.exe` and `scripts\install-xi-task.ps1` to `C:\qwen-cluster` (see the operator guide §7.5). No runtime is needed: XI is a self-contained executable.
 
 ## 4. Firewall 🔒
 

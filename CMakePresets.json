@@ -1,0 +1,29 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "vs",
+      "displayName": "Visual Studio (x64, multi-config)",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/vs"
+    },
+    {
+      "name": "ninja-release",
+      "displayName": "Ninja Release (run from a Developer PowerShell for VS)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja-release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "CMAKE_CXX_COMPILER": "cl" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "vs", "configuration": "Release" },
+    { "name": "debug", "configurePreset": "vs", "configuration": "Debug" },
+    { "name": "ninja-release", "configurePreset": "ninja-release" }
+  ],
+  "testPresets": [
+    { "name": "release", "configurePreset": "vs", "configuration": "Release", "output": { "outputOnFailure": true } },
+    { "name": "ninja-release", "configurePreset": "ninja-release", "output": { "outputOnFailure": true } }
+  ]
+}

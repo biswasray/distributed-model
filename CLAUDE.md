@@ -6,9 +6,14 @@ Guidance for Claude (and any AI assistant) working in this repository.
 
 **Qwen Cluster**: a system that runs Qwen LLMs across about 50 Windows PCs on a shared Wi-Fi LAN. Each PC has about 8 GB free RAM and no usable GPU. Large models are split across PCs with **llama.cpp RPC (pipeline parallelism)**. Throughput comes from **many independent replicas (groups)** behind one **OpenAI-compatible router**.
 
-**Current phase: documentation and design first.** The architecture is specified in Markdown. The repository contains no implementation code yet.
+**Current phase: implementation.** The architecture is specified in Markdown, and the control plane is implemented in C++20 with CMake and MSVC ([ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md)):
 
-> **Don't write or change implementation code unless the user explicitly asks for it.** By default, work on the docs, ADRs, and skills.
+- **XGI** (`xgi.exe`, Extended General Intelligence): the coordinator and router (`xgi coordinator | router | serve | check-config`)
+- **XI** (`xi.exe`, Extended Interface): the node agent
+
+Inference is still llama.cpp. XGI orchestrates it and is not an inference engine.
+
+> Code must follow the docs. If you change behaviour or a contract, update the docs in the order given in "Sources of truth" below. Build and test with `cmake --preset vs`, `cmake --build --preset release`, and `ctest --preset release` (unit tests plus an end-to-end run with mock llama.cpp binaries).
 
 ## Repository layout
 
@@ -25,7 +30,14 @@ docs/
 │   ├── 05-protocols-and-data.md       ← ports, JSON schemas, cluster.yaml schema
 │   └── 06-security.md                 ← threat model and hardening checklist
 ├── adr/                               ← Architecture Decision Records (immutable once accepted)
-└── .claude/skills/                    ← project skills (see below)
+├── .claude/skills/                    ← project skills (see below)
+├── CMakeLists.txt · CMakePresets.json · cmake/Dependencies.cmake   ← build; deps pinned by SHA-256
+├── src/common/                        ← config (cluster.yaml), HTTP helpers, logging, sysinfo
+├── src/xi/                            ← XI: agent API, command lines, Windows process supervisor
+├── src/xgi/                           ← XGI: coordinator, placement, router, scheduling
+├── tests/                             ← unit tests, mock llama.cpp binaries, e2e/run-e2e.ps1
+├── examples/cluster.yaml              ← example config (option D)
+└── scripts/install-xi-task.ps1        ← registers xi.exe as a startup task
 ```
 
 ## Sources of truth

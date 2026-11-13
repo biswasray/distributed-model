@@ -2,7 +2,13 @@
 
 Run Qwen LLMs across about 50 Windows PCs on a Wi-Fi LAN with llama.cpp. Large models are split across machines, many copies serve requests in parallel, and clients reach everything through one OpenAI-compatible endpoint.
 
-> **Status:** design phase. The documents below are the specification. The implementation hasn't been built yet.
+> **Status:** implemented in C++ ([ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md)): **XGI** (`xgi.exe`, the coordinator and router) and **XI** (`xi.exe`, the node agent). The documents below are the specification the code follows. Performance figures are still estimates.
+
+```powershell
+cmake --preset vs; cmake --build --preset release; ctest --preset release
+```
+
+Code: `src/common` (config, HTTP, sysinfo), `src/xi` (agent, process supervisor), `src/xgi` (coordinator, placement, router), `tests/` (unit, mocks, e2e).
 
 ## Start here
 
@@ -34,6 +40,7 @@ Run Qwen LLMs across about 50 Windows PCs on a Wi-Fi LAN with llama.cpp. Large m
 - [ADR-004](adr/ADR-004-shared-cluster-token.md) Shared cluster token
 - [ADR-005](adr/ADR-005-model-files-relative-to-models-dir.md) Model files pre-staged, relative paths
 - [ADR-006](adr/ADR-006-in-memory-coordinator-state.md) In-memory coordinator state
+- [ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md) C++ implementation: XGI and XI
 
 ## Claude skills (`.claude/skills/`)
 
