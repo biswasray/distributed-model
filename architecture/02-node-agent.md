@@ -1,6 +1,6 @@
 # 02 · Node Agent
 
-> Component spec. Runs on **every** node. Port **8200**. Implemented by **XI** (`xi.exe`, [ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md)).
+> Component spec. Runs on **every** node. Port **8200**. Implemented by **XI** (`xi` / `xi.exe`, [ADR-007](../adr/ADR-007-cpp-implementation-xgi-xi.md), portable per [ADR-008](../adr/ADR-008-cross-platform-build.md)).
 
 ## 1. Responsibilities
 
@@ -22,9 +22,9 @@ The agent has **no scheduling logic**. It never decides on its own to start or s
 | `--host` / `--port` | `0.0.0.0` / `8200` | Interface and port for the agent API |
 | `--name` | hostname | `node_id`. It must be unique in the cluster. |
 | `--advertise-ip` | auto | The IP other nodes use to reach this one. Auto-detected from the route to the coordinator. |
-| `--llama-dir` | `.\llama.cpp` | Folder containing `rpc-server.exe` and `llama-server.exe` |
-| `--models-dir` | `.\models` | Folder scanned (recursively) for `*.gguf` files |
-| `--log-dir` | `.\logs` | Agent and child process logs |
+| `--llama-dir` | `llama.cpp` (relative to the working directory) | Folder containing `rpc-server` and `llama-server` (`.exe` on Windows) |
+| `--models-dir` | `models` | Folder scanned (recursively) for `*.gguf` files |
+| `--log-dir` | `logs` | Agent and child process logs |
 | `--rpc-port` | `50052` | Port `rpc-server` listens on |
 | `--head-port` | `8080` | Port `llama-server` listens on |
 | `--rpc-server-bin` / `--llama-server-bin` | — | Override the binary paths. Tests use `mock-rpc-server.exe` / `mock-llama-server.exe`. A `.py` path runs with `python` from `PATH`. |
@@ -88,8 +88,9 @@ llama-server -m <models_dir>/<model_file> --host 0.0.0.0 --port <head_port>
 | Graceful stop | Terminate, wait up to 15 seconds, then kill. |
 | Output capture | stdout and stderr are merged, appended to `logs\<role>.log`, and the last 500 lines are kept in memory. The agent's own log is `logs\xi.log`. |
 | Windows specifics | Children start with `CREATE_NEW_PROCESS_GROUP`, so console signals don't spread to the agent. "Terminate" is `CTRL_BREAK` when the agent has a console, and otherwise a hard kill. Each child runs in a kill-on-close **job object**, so it dies with the agent even if the agent crashes. |
+| Linux / macOS specifics | Children start in their own process group (`setpgid`). "Terminate" is `SIGTERM` to the group, then `SIGKILL` after the grace period. Other inherited file descriptors are closed. On Linux, `PR_SET_PDEATHSIG` kills the child if the agent dies. macOS has no equivalent, so a crashed agent can leave a child running until the next start replaces it. `exit_code` is negative (`-signal`) when a signal killed the process. |
 | Exit detection | The heartbeat reports `state: exited` with `pid` and `exit_code`. A process stopped on request reports `stopped`. The **coordinator** decides what to do about it. |
-| Agent shutdown | All children are stopped on Ctrl+C or console close, and by the job object if the agent dies. |
+| Agent shutdown | All children are stopped on Ctrl+C, console close, `SIGINT` or `SIGTERM`, and by the job object or the parent-death signal if the agent dies. |
 
 ## 6. Safety constraints
 
@@ -103,6 +104,6 @@ llama-server -m <models_dir>/<model_file> --host 0.0.0.0 --port <head_port>
 
 ## 8. Running as a service
 
-Register the agent as a Task Scheduler task that runs **at startup as SYSTEM**. The command is in the [setup guide §7.6](../distributed-qwen-cluster.md#76-run-the-node-agent-as-a-startup-service).
+On Windows, register the agent as a Task Scheduler task that runs **at startup as SYSTEM**. The command is in the [setup guide §7.6](../distributed-qwen-cluster.md#76-run-the-node-agent-as-a-startup-service). On Linux it runs as a systemd unit, and on macOS as a launchd daemon (`scripts/install-xi-service.sh`).
 
 Also on each node: turn off sleep and hibernation, and set the Wi-Fi adapter power mode to *Maximum Performance*.

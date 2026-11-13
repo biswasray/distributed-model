@@ -2,8 +2,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <fstream>
-#include <iostream>
 #include <mutex>
 
 namespace xgi::log {
@@ -22,6 +22,22 @@ const char* level_name(Level l) {
         case Level::error: return "ERROR";
     }
     return "?";
+}
+
+// Local time "YYYY-MM-DD HH:MM:SS.mmm" without <chrono> time zones (not in every libc++).
+std::string timestamp() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+    return std::format("{}.{:03}", buf, ms);
 }
 
 }  // namespace
@@ -52,9 +68,7 @@ Level parse_level(std::string_view s) {
 void write(Level level, std::string_view msg) {
     std::lock_guard lk(g_mu);
     if (level < g_min) return;
-    auto now = std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now());
-    auto local = std::chrono::zoned_time{std::chrono::current_zone(), now};
-    std::string line = std::format("{:%Y-%m-%d %H:%M:%S} {:<5} {}: {}\n", local, level_name(level), g_name, msg);
+    std::string line = std::format("{} {:<5} {}: {}\n", timestamp(), level_name(level), g_name, msg);
     std::fwrite(line.data(), 1, line.size(), stderr);
     std::fflush(stderr);
     if (g_file.is_open()) {

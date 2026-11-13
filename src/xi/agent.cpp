@@ -4,6 +4,8 @@
 
 #include "common/http_util.hpp"
 #include "common/log.hpp"
+#include "common/net.hpp"
+#include "common/platform.hpp"
 #include "common/sysinfo.hpp"
 #include "xi/commands.hpp"
 
@@ -13,8 +15,8 @@ using xgi::json;
 
 Agent::Agent(AgentOptions opts) : opts_(std::move(opts)) {
     if (opts_.name.empty()) opts_.name = xgi::sysinfo::hostname();
-    if (opts_.rpc_server_bin.empty()) opts_.rpc_server_bin = opts_.llama_dir / "rpc-server.exe";
-    if (opts_.llama_server_bin.empty()) opts_.llama_server_bin = opts_.llama_dir / "llama-server.exe";
+    if (opts_.rpc_server_bin.empty()) opts_.rpc_server_bin = opts_.llama_dir / ("rpc-server" + std::string(xgi::kExeSuffix));
+    if (opts_.llama_server_bin.empty()) opts_.llama_server_bin = opts_.llama_dir / ("llama-server" + std::string(xgi::kExeSuffix));
     std::error_code ec;
     std::filesystem::create_directories(opts_.log_dir, ec);
     rpc_ = std::make_unique<ManagedProcess>("rpc", opts_.log_dir / "rpc.log");
@@ -27,7 +29,7 @@ Agent::~Agent() { stop(); }
 
 std::string Agent::coordinator_host_ip() {
     auto url = xgi::parse_base_url(opts_.coordinator);
-    std::string ip = url ? xgi::sysinfo::route_ip_to(url->host, url->port) : "";
+    std::string ip = url ? xgi::route_ip_to(url->host, url->port) : "";
     return ip.empty() ? "127.0.0.1" : ip;
 }
 
@@ -172,7 +174,7 @@ void Agent::control_loop() {
     // 02-node-agent.md §3: register (retry every 5 s) -> heartbeat loop; 404 -> re-register at once.
     // Children keep running while the coordinator is unreachable.
     bool registered = false;
-    while (!stop_flag_.is_set()) {
+    while (!stop_flag_.stop_requested()) {
         if (!registered) {
             registered = do_register();
             if (!registered) {
@@ -198,7 +200,7 @@ bool Agent::run() {
     }
     xgi::log::info("XI {} node '{}' listening on {}:{} (advertise {}), coordinator {}", xgi::kVersion, opts_.name,
                    opts_.host, opts_.port, opts_.advertise_ip, opts_.coordinator);
-    xgi::log::info("models dir {} has {} GGUF file(s); auth {}", xgi::narrow(opts_.models_dir.wstring()),
+    xgi::log::info("models dir {} has {} GGUF file(s); auth {}", xgi::path_to_utf8(opts_.models_dir),
                    scan_models(opts_.models_dir).size(), opts_.token.empty() ? "OFF" : "on");
     control_thread_ = std::thread([this] { control_loop(); });
     server_.listen_after_bind();
@@ -206,14 +208,21 @@ bool Agent::run() {
 }
 
 void Agent::request_shutdown() {
-    stop_flag_.set();
+    // Stop the children before the HTTP server: on Linux they carry PR_SET_PDEATHSIG, which
+    // fires when the server thread that started them exits, and would skip the graceful stop.
+    stop_flag_.request_stop();
+    {
+        std::lock_guard lk(start_mu_);
+        head_->stop(15);
+        rpc_->stop(15);
+    }
     server_.stop();
 }
 
 void Agent::stop() {
     if (stopped_.exchange(true)) return;
     xgi::log::info("shutting down: stopping child processes");
-    stop_flag_.set();
+    stop_flag_.request_stop();
     server_.stop();
     if (control_thread_.joinable()) control_thread_.join();
     std::lock_guard lk(start_mu_);

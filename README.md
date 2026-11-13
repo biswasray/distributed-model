@@ -2,10 +2,11 @@
 
 Run Qwen LLMs across about 50 Windows PCs on a Wi-Fi LAN with llama.cpp. Large models are split across machines, many copies serve requests in parallel, and clients reach everything through one OpenAI-compatible endpoint.
 
-> **Status:** implemented in C++ ([ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md)): **XGI** (`xgi.exe`, the coordinator and router) and **XI** (`xi.exe`, the node agent). The documents below are the specification the code follows. Performance figures are still estimates.
+> **Status:** implemented in C++ ([ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md)): **XGI** (`xgi`, the coordinator and router) and **XI** (`xi`, the node agent). It builds and runs on Windows, Linux and macOS with MSVC, GCC, Clang or MinGW-w64 ([ADR-008](adr/ADR-008-cross-platform-build.md)). The documents below are the specification the code follows. Performance figures are still estimates.
 
-```powershell
-cmake --preset vs; cmake --build --preset release; ctest --preset release
+```sh
+cmake --preset release && cmake --build --preset release && ctest --preset release   # Ninja + any compiler
+cmake --preset vs; cmake --build --preset vs-release; ctest --preset vs-release       # Windows, Visual Studio
 ```
 
 Code: `src/common` (config, HTTP, sysinfo), `src/xi` (agent, process supervisor), `src/xgi` (coordinator, placement, router), `tests/` (unit, mocks, e2e).
@@ -42,6 +43,7 @@ Code: `src/common` (config, HTTP, sysinfo), `src/xi` (agent, process supervisor)
 - [ADR-005](adr/ADR-005-model-files-relative-to-models-dir.md) Model files pre-staged, relative paths
 - [ADR-006](adr/ADR-006-in-memory-coordinator-state.md) In-memory coordinator state
 - [ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md) C++ implementation: XGI and XI
+- [ADR-008](adr/ADR-008-cross-platform-build.md) Cross-platform: Windows, Linux, macOS, any C++20 compiler
 
 ## Claude skills (`.claude/skills/`)
 

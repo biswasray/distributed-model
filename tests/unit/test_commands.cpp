@@ -1,7 +1,8 @@
-#include <windows.h>
-
+#include <algorithm>
 #include <fstream>
+#include <random>
 
+#include "common/platform.hpp"
 #include "common/util.hpp"
 #include "testing.hpp"
 #include "xi/commands.hpp"
@@ -18,8 +19,7 @@ bool contains(const std::vector<std::string>& v, const std::string& s) { return 
 struct TempDir {
     fs::path path;
     TempDir() {
-        path = fs::temp_directory_path() / ("xgi-test-" + std::to_string(GetCurrentProcessId()) + "-" +
-                                            std::to_string(GetTickCount64()));
+        path = fs::temp_directory_path() / ("xgi-test-" + std::to_string(std::random_device{}()));
         fs::create_directories(path);
     }
     ~TempDir() {
@@ -84,7 +84,7 @@ TEST_CASE("xi: model paths stay inside the models dir (ADR-005)") {
     CHECK(!resolve_model_path(models.path, "missing.gguf").has_value());
     CHECK(!resolve_model_path(models.path, "../a.gguf").has_value());
     CHECK(!resolve_model_path(models.path, "sub/../../a.gguf").has_value());
-    CHECK(!resolve_model_path(models.path, xgi::narrow((models.path / "a.gguf").wstring())).has_value());
+    CHECK(!resolve_model_path(models.path, xgi::path_to_utf8(models.path / "a.gguf")).has_value());  // absolute
     CHECK(!resolve_model_path(models.path, "sub/notes.txt").has_value());
 
     auto found = scan_models(models.path);
@@ -94,11 +94,16 @@ TEST_CASE("xi: model paths stay inside the models dir (ADR-005)") {
 }
 
 TEST_CASE("xi: Windows argument quoting") {
-    CHECK(quote_windows_arg(L"plain") == L"plain");
-    CHECK(quote_windows_arg(L"") == L"\"\"");
-    CHECK(quote_windows_arg(L"C:\\Program Files\\x.exe") == L"\"C:\\Program Files\\x.exe\"");
-    CHECK(quote_windows_arg(L"a \"b\"") == L"\"a \\\"b\\\"\"");
-    CHECK(quote_windows_arg(L"dir with space\\") == L"\"dir with space\\\\\"");
+    CHECK_EQ(quote_windows_arg("plain"), std::string("plain"));
+    CHECK_EQ(quote_windows_arg(""), std::string("\"\""));
+    CHECK_EQ(quote_windows_arg("C:\\Program Files\\x.exe"), std::string("\"C:\\Program Files\\x.exe\""));
+    CHECK_EQ(quote_windows_arg("a \"b\""), std::string("\"a \\\"b\\\"\""));
+    CHECK_EQ(quote_windows_arg("dir with space\\"), std::string("\"dir with space\\\\\""));
+    CHECK_EQ(quote_windows_arg("C:\\Users\\Zoë\\m.gguf"), std::string("C:\\Users\\Zoë\\m.gguf"));  // UTF-8 untouched
     auto py = program_argv("mock.py", {"-p", "1"});
+#if defined(XGI_WINDOWS)
     CHECK_EQ(py.front(), std::string("python"));
+#else
+    CHECK_EQ(py.front(), std::string("python3"));
+#endif
 }

@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "common/config.hpp"
+#include "common/platform.hpp"
 #include "common/util.hpp"
 
 namespace xi {
@@ -75,7 +76,7 @@ std::vector<std::string> build_rpc_args(int rpc_port, int threads, bool cache) {
 std::vector<std::string> build_head_args(const fs::path& model_path, int head_port, const HeadStartRequest& r,
                                          int threads) {
     std::vector<std::string> a{
-        "-m", xgi::narrow(model_path.wstring()),
+        "-m", xgi::path_to_utf8(model_path),
         "--host", "0.0.0.0",
         "--port", std::to_string(head_port),
         // llama-server divides -c evenly between slots; keep per-request context = pool context.
@@ -103,11 +104,11 @@ std::optional<fs::path> resolve_model_path(const fs::path& models_dir, const std
     std::error_code ec;
     fs::path root = fs::weakly_canonical(fs::absolute(models_dir, ec), ec);
     if (ec) return std::nullopt;
-    fs::path candidate = fs::weakly_canonical(root / xgi::widen(xgi::normalize_model_path(model_file)), ec);
+    fs::path candidate = fs::weakly_canonical(root / xgi::path_from_utf8(xgi::normalize_model_path(model_file)), ec);
     if (ec) return std::nullopt;
     // After resolving symlinks the file must still be inside the models dir.
     fs::path rel = candidate.lexically_relative(root);
-    if (rel.empty() || rel.is_absolute() || *rel.begin() == L"..") return std::nullopt;
+    if (rel.empty() || rel.is_absolute() || *rel.begin() == fs::path("..")) return std::nullopt;
     if (!fs::is_regular_file(candidate, ec)) return std::nullopt;
     return candidate;
 }
@@ -120,51 +121,56 @@ std::vector<std::string> scan_models(const fs::path& models_dir) {
     for (; !ec && it != end; it.increment(ec)) {
         const auto& p = it->path();
         if (!it->is_regular_file(ec)) continue;
-        if (!xgi::ends_with_ci(xgi::narrow(p.extension().wstring()), ".gguf")) continue;
-        out.push_back(xgi::normalize_model_path(xgi::narrow(p.lexically_relative(models_dir).generic_wstring())));
+        if (!xgi::ends_with_ci(xgi::path_to_utf8(p.extension()), ".gguf")) continue;
+        out.push_back(xgi::normalize_model_path(xgi::generic_utf8(p.lexically_relative(models_dir))));
     }
     std::sort(out.begin(), out.end());
     return out;
 }
 
 std::vector<std::string> program_argv(const fs::path& bin, const std::vector<std::string>& args) {
+#if defined(XGI_WINDOWS)
+    const char* python = "python";
+#else
+    const char* python = "python3";
+#endif
     std::vector<std::string> argv;
-    if (xgi::ends_with_ci(xgi::narrow(bin.extension().wstring()), ".py")) argv.push_back("python");
-    argv.push_back(xgi::narrow(bin.wstring()));
+    if (xgi::ends_with_ci(xgi::path_to_utf8(bin.extension()), ".py")) argv.push_back(python);
+    argv.push_back(xgi::path_to_utf8(bin));
     argv.insert(argv.end(), args.begin(), args.end());
     return argv;
 }
 
-std::wstring quote_windows_arg(const std::wstring& arg) {
-    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring::npos) return arg;
-    std::wstring out = L"\"";
+std::string quote_windows_arg(const std::string& arg) {
+    const char bs = '\\';
+    if (!arg.empty() && arg.find_first_of(" \t\n\v\"") == std::string::npos) return arg;
+    std::string out = "\"";
     for (auto it = arg.begin();; ++it) {
         size_t backslashes = 0;
-        while (it != arg.end() && *it == L'\\') {
+        while (it != arg.end() && *it == bs) {
             ++it;
             ++backslashes;
         }
         if (it == arg.end()) {
-            out.append(backslashes * 2, L'\\');
+            out.append(backslashes * 2, bs);  // double them: the closing quote follows
             break;
         }
-        if (*it == L'"') {
-            out.append(backslashes * 2 + 1, L'\\');
-            out.push_back(*it);
+        if (*it == '"') {
+            out.append(backslashes * 2 + 1, bs);
         } else {
-            out.append(backslashes, L'\\');
-            out.push_back(*it);
+            out.append(backslashes, bs);
         }
+        out.push_back(*it);
     }
-    out.push_back(L'"');
+    out.push_back('"');
     return out;
 }
 
-std::wstring build_command_line(const std::vector<std::string>& argv) {
-    std::wstring cmd;
+std::string build_command_line(const std::vector<std::string>& argv) {
+    std::string cmd;
     for (size_t i = 0; i < argv.size(); ++i) {
-        if (i) cmd.push_back(L' ');
-        cmd += quote_windows_arg(xgi::widen(argv[i]));
+        if (i) cmd.push_back(' ');
+        cmd += quote_windows_arg(argv[i]);
     }
     return cmd;
 }

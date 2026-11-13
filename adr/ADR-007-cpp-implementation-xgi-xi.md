@@ -1,6 +1,6 @@
 # ADR-007: Implement the control plane in C++ as XGI and XI
 
-- **Status:** Accepted
+- **Status:** Accepted; toolchain and platform scope amended by [ADR-008](ADR-008-cross-platform-build.md)
 - **Date:** 2026-11-13
 
 ## Context

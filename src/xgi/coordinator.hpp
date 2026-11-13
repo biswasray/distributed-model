@@ -10,7 +10,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
-#include <stop_token>
+#include "common/util.hpp"
 #include <string>
 #include <thread>
 #include <vector>
@@ -77,7 +77,7 @@ private:
         bool repair_unplaced = false;  // became unplaced during repair: retry may use spares
     };
     struct Task {
-        std::stop_source stop;
+        StopSource stop;
         std::thread thread;
         std::shared_future<void> finished;
     };
@@ -115,14 +115,14 @@ private:
     void launch_locked(Group& g, TaskKind kind);
     std::shared_ptr<Task> cancel_task_locked(Group& g);
     bool task_busy_locked(const std::string& gid) const;
-    void run_task(const std::string& gid, std::uint64_t gen, TaskKind kind, std::stop_token st);
-    void start_sequence(const std::string& gid, std::uint64_t gen, std::stop_token st);
+    void run_task(const std::string& gid, std::uint64_t gen, TaskKind kind, StopToken st);
+    void start_sequence(const std::string& gid, std::uint64_t gen, StopToken st);
     void fail_task(const std::string& gid, std::uint64_t gen, const std::string& reason);
     void stop_endpoints(const std::vector<Endpoint>& eps);
     int undeploy_all();
 
     // --- monitor
-    void monitor_loop(std::stop_token st);
+    void monitor_loop(StopToken st);
     void monitor_cycle();
     void reap_tasks();
 
@@ -135,7 +135,8 @@ private:
     std::map<std::string, std::shared_ptr<Task>> tasks_;
     std::vector<std::shared_ptr<Task>> retired_;
     std::mutex deploy_mu_;  // serialises deploy/undeploy
-    std::jthread monitor_;
+    std::thread monitor_;
+    StopSource monitor_stop_;
 };
 
 }  // namespace xgi

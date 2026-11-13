@@ -137,7 +137,7 @@ void Router::update_table(const json& groups) {
     cv_.notify_all();
 }
 
-void Router::poll_loop(std::stop_token st) {
+void Router::poll_loop(StopToken st) {
     bool warned = false;
     do {
         auto r = http_call("GET", cfg_.router.coordinator_url, "/groups", cfg_.cluster_token, nullptr, 5);
@@ -158,7 +158,7 @@ void Router::poll_loop(std::stop_token st) {
 }
 
 void Router::start() {
-    poller_ = std::jthread([this](std::stop_token st) { poll_loop(st); });
+    poller_ = std::thread([this, st = poller_stop_.token()] { poll_loop(st); });
 }
 
 void Router::stop() {
@@ -168,7 +168,7 @@ void Router::stop() {
     }
     cv_.notify_all();
     if (poller_.joinable()) {
-        poller_.request_stop();
+        poller_stop_.request_stop();
         poller_.join();
     }
 }

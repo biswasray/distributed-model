@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| **Status** | Implemented in C++ as **XGI** (`xgi.exe`: coordinator + router) and **XI** (`xi.exe`: node agent). See [ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md). Not yet benchmarked on real hardware. |
+| **Status** | Implemented in C++ as **XGI** (`xgi.exe`: coordinator + router) and **XI** (`xi.exe`: node agent). See [ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md). Also runs on Linux and macOS ([ADR-008](adr/ADR-008-cross-platform-build.md)). Not yet benchmarked on real hardware. |
 | **Target hardware** | 50 × Windows PCs, ~8 GB free RAM each, ≥300 MB GPU (not used), connected over Wi-Fi |
 | **Target models** | Qwen2.5-72B-Instruct, Qwen3-30B-A3B (MoE), Qwen2.5-7B-Instruct |
 | **Inference engine** | [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server` + `rpc-server`) |
@@ -302,14 +302,16 @@ To save Wi-Fi bandwidth, download once to a USB drive or a wired machine and cop
 
 ### 7.5 Install the cluster services
 
-Build once, on any Windows machine with Visual Studio 2022 or later (the "Desktop development with C++" workload) and internet access for the first configure:
+Build once, with internet access for the first configure. On Windows, use Visual Studio 2022 or later (the "Desktop development with C++" workload):
 
 ```powershell
 cmake --preset vs
-cmake --build --preset release
-ctest --preset release                      # unit + end-to-end tests (mock llama.cpp)
+cmake --build --preset vs-release
+ctest --preset vs-release                   # unit + end-to-end tests (mock llama.cpp)
 cmake --install build\vs --config Release --prefix C:\qwen-cluster
 ```
+
+Any other C++20 toolchain works too, including MinGW-w64, GCC, Clang, and builds on Linux or macOS. See [HOW_TO_RUN.md](HOW_TO_RUN.md#1-build).
 
 This puts `bin\xi.exe`, `bin\xgi.exe`, `cluster.yaml` (an example) and `scripts\install-xi-task.ps1` under `C:\qwen-cluster`. Copy that folder to every node. Nodes only need `bin\xi.exe` and the script. The control machine needs `bin\xgi.exe` and `cluster.yaml`.
 

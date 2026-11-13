@@ -12,7 +12,6 @@ namespace xgi {
 
 namespace {
 
-constexpr double kAgentTimeoutS = 10;       // ordinary agent calls (03 §8)
 constexpr double kAgentStartTimeoutS = 30;  // start = stop old process (≤15 s grace) + spawn
 constexpr double kAgentStopTimeoutS = 40;   // stop all = head + rpc, ≤15 s grace each
 constexpr double kRpcPortTimeoutS = 60;     // 03 §5 step 3
@@ -409,7 +408,7 @@ void Coordinator::launch_locked(Group& g, TaskKind kind) {
     std::promise<void> done;
     t->finished = done.get_future().share();
     std::string gid = g.group_id;
-    t->thread = std::thread([this, gid, gen, kind, prev, st = t->stop.get_token(), done = std::move(done)]() mutable {
+    t->thread = std::thread([this, gid, gen, kind, prev, st = t->stop.token(), done = std::move(done)]() mutable {
         if (prev) prev->finished.wait();  // never two tasks acting on one group at once
         try {
             run_task(gid, gen, kind, st);
@@ -440,7 +439,7 @@ void Coordinator::stop_endpoints(const std::vector<Endpoint>& eps) {
     }
 }
 
-void Coordinator::run_task(const std::string& gid, std::uint64_t gen, TaskKind kind, std::stop_token st) {
+void Coordinator::run_task(const std::string& gid, std::uint64_t gen, TaskKind kind, StopToken st) {
     if (kind == TaskKind::restart || kind == TaskKind::repair) {
         std::vector<Endpoint> members;
         {
@@ -468,7 +467,7 @@ void Coordinator::run_task(const std::string& gid, std::uint64_t gen, TaskKind k
     start_sequence(gid, gen, st);
 }
 
-void Coordinator::start_sequence(const std::string& gid, std::uint64_t gen, std::stop_token st) {
+void Coordinator::start_sequence(const std::string& gid, std::uint64_t gen, StopToken st) {
     std::vector<Endpoint> workers;
     Endpoint head;
     PoolConfig pool;
@@ -608,12 +607,12 @@ int Coordinator::undeploy_all() {
 // ------------------------------------------------------------------------------------------ monitor
 
 void Coordinator::start() {
-    monitor_ = std::jthread([this](std::stop_token st) { monitor_loop(st); });
+    monitor_ = std::thread([this, st = monitor_stop_.token()] { monitor_loop(st); });
 }
 
 void Coordinator::stop() {
     if (monitor_.joinable()) {
-        monitor_.request_stop();
+        monitor_stop_.request_stop();
         monitor_.join();
     }
     std::vector<std::shared_ptr<Task>> all;
@@ -632,7 +631,7 @@ void Coordinator::stop() {
         if (t->thread.joinable()) t->thread.join();
 }
 
-void Coordinator::monitor_loop(std::stop_token st) {
+void Coordinator::monitor_loop(StopToken st) {
     while (interruptible_sleep(st, cfg_.coordinator.heartbeat_interval_s)) {
         try {
             monitor_cycle();

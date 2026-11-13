@@ -7,6 +7,8 @@
 #include <optional>
 #include <string>
 
+#include "common/net.hpp"
+
 namespace xgi {
 
 using json = nlohmann::json;
@@ -40,11 +42,5 @@ struct HttpResult {
 // One JSON call with a total per-operation timeout. `body` is ignored for GET.
 HttpResult http_call(const std::string& method, const std::string& base_url, const std::string& path,
                      const std::string& token, const json& body, double timeout_s);
-
-// True if a TCP connection to host:port succeeds within timeout_ms.
-bool tcp_probe(const std::string& host, int port, int timeout_ms);
-
-// Calls WSAStartup once. Safe to call repeatedly.
-void ensure_winsock();
 
 }  // namespace xgi

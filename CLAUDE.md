@@ -6,14 +6,14 @@ Guidance for Claude (and any AI assistant) working in this repository.
 
 **Qwen Cluster**: a system that runs Qwen LLMs across about 50 Windows PCs on a shared Wi-Fi LAN. Each PC has about 8 GB free RAM and no usable GPU. Large models are split across PCs with **llama.cpp RPC (pipeline parallelism)**. Throughput comes from **many independent replicas (groups)** behind one **OpenAI-compatible router**.
 
-**Current phase: implementation.** The architecture is specified in Markdown, and the control plane is implemented in C++20 with CMake and MSVC ([ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md)):
+**Current phase: implementation.** The architecture is specified in Markdown, and the control plane is implemented in portable C++20 with CMake ([ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md), [ADR-008](adr/ADR-008-cross-platform-build.md)). It builds with MSVC, GCC, Clang or MinGW-w64 on Windows, Linux and macOS:
 
-- **XGI** (`xgi.exe`, Extended General Intelligence): the coordinator and router (`xgi coordinator | router | serve | check-config`)
-- **XI** (`xi.exe`, Extended Interface): the node agent
+- **XGI** (`xgi`, Extended General Intelligence): the coordinator and router (`xgi coordinator | router | serve | check-config`)
+- **XI** (`xi`, Extended Interface): the node agent
 
 Inference is still llama.cpp. XGI orchestrates it and is not an inference engine.
 
-> Code must follow the docs. If you change behaviour or a contract, update the docs in the order given in "Sources of truth" below. Build and test with `cmake --preset vs`, `cmake --build --preset release`, and `ctest --preset release` (unit tests plus an end-to-end run with mock llama.cpp binaries).
+> Code must follow the docs. If you change behaviour or a contract, update the docs in the order given in "Sources of truth" below. Build and test with `cmake --preset release`, `cmake --build --preset release` and `ctest --preset release` (Ninja, any compiler), or the `vs` / `vs-release` presets on Windows. The tests are unit tests plus end-to-end runs with mock llama.cpp binaries. OS-specific code lives only in `*_windows.cpp`, `*_posix.cpp`, `*_linux.cpp` and `*_macos.cpp` files, plus small `#if` blocks in `common/net.cpp` and `common/shutdown.cpp`.
 
 ## Repository layout
 
@@ -32,12 +32,13 @@ docs/
 ├── adr/                               ← Architecture Decision Records (immutable once accepted)
 ├── .claude/skills/                    ← project skills (see below)
 ├── CMakeLists.txt · CMakePresets.json · cmake/Dependencies.cmake   ← build; deps pinned by SHA-256
-├── src/common/                        ← config (cluster.yaml), HTTP helpers, logging, sysinfo
-├── src/xi/                            ← XI: agent API, command lines, Windows process supervisor
+├── cmake/toolchains/                  ← cross-compile toolchain files (MinGW-w64)
+├── src/common/                        ← config, HTTP, logging, sockets, shutdown, sysinfo_<os>.cpp
+├── src/xi/                            ← XI: agent API, command lines, process_windows/posix.cpp
 ├── src/xgi/                           ← XGI: coordinator, placement, router, scheduling
-├── tests/                             ← unit tests, mock llama.cpp binaries, e2e/run-e2e.ps1
+├── tests/                             ← unit tests, mock llama.cpp binaries, e2e/run-e2e.ps1, e2e/smoke.sh
 ├── examples/cluster.yaml              ← example config (option D)
-└── scripts/install-xi-task.ps1        ← registers xi.exe as a startup task
+└── scripts/                           ← install-xi-task.ps1 (Windows), install-xi-service.sh (systemd/launchd)
 ```
 
 ## Sources of truth
@@ -53,7 +54,7 @@ If you change a contract (an endpoint, field, port, or config key), update `05-p
 
 ## Design invariants: don't violate these without a new ADR
 
-- **Windows-native.** Nothing Linux-only (vLLM, Ray, NCCL, WSL as a requirement).
+- **Windows-native, and portable.** Everything must work natively on Windows, and nothing may be Linux-only (vLLM, Ray, NCCL, WSL as a requirement). XGI/XI also build and run on Linux and macOS ([ADR-008](adr/ADR-008-cross-platform-build.md)). Don't break any of the three, and keep OS code in the per-OS files.
 - **CPU-only.** Don't assume GPU offload.
 - **No tensor parallelism over Wi-Fi.** Use pipeline groups only to make a model fit, and replicas for speed ([ADR-002](adr/ADR-002-pipeline-not-tensor-parallelism.md)). Never suggest "add more nodes to a group to make it faster".
 - **Groups are 1 head + (k−1) workers.** The head runs `llama-server` and must already hold the GGUF file. Workers run `rpc-server -c`.
@@ -78,7 +79,7 @@ Performance figures are **estimates** and must always be labelled as such until 
 ## Writing conventions
 
 - Markdown, using GitHub-flavoured tables and fenced code blocks. Diagrams are ASCII inside fenced code blocks, so they render anywhere.
-- Commands are **PowerShell** for Windows nodes. Use `curl.exe` or `Invoke-RestMethod`, and quote JSON correctly for PowerShell.
+- Commands are **PowerShell** for Windows nodes. Use `curl.exe` or `Invoke-RestMethod`, and quote JSON correctly for PowerShell. Where Linux/macOS steps differ, add a `sh` block next to the PowerShell one.
 - Number the architecture docs (`NN-name.md`) and link between them with relative links.
 - Sizes are in GB (decimal) in prose, and in bytes in API schemas. Times are in seconds.
 - Keep the operator guide task-focused. Rationale belongs in ADRs, and exact contracts belong in `05-protocols-and-data.md`.
