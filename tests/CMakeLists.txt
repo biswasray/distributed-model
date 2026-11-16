@@ -7,6 +7,7 @@ add_executable(xgi_tests
     unit/test_placement.cpp
     unit/test_runtimes.cpp
     unit/test_scheduling.cpp
+    unit/test_settings.cpp
 )
 target_link_libraries(xgi_tests PRIVATE xi_lib xgi_lib)
 add_test(NAME unit COMMAND xgi_tests)

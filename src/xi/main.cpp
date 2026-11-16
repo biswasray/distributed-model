@@ -1,6 +1,8 @@
 // xi — XI (Extended Interface), the Qwen Cluster node agent. See architecture/02-node-agent.md.
+#include <fstream>
 #include <iostream>
 #include <set>
+#include <sstream>
 
 #include "common/cli.hpp"
 #include "common/http_util.hpp"
@@ -8,6 +10,7 @@
 #include "common/net.hpp"
 #include "common/platform.hpp"
 #include "common/shutdown.hpp"
+#include "common/sysinfo.hpp"
 #include "common/util.hpp"
 #include "xi/agent.hpp"
 
@@ -15,12 +18,18 @@ namespace {
 
 const char* kUsage = R"(xi - XI (Extended Interface): Qwen Cluster node agent
 
-Usage: xi --coordinator http://<control-ip>:8100 [options]
+Usage: xi [--coordinator http://<control-ip>:8100] [options]
 
-  --coordinator URL        Coordinator base URL (required)
-  --token TOKEN            Cluster token (default: env QWEN_CLUSTER_TOKEN)
+Settings come from built-in defaults, then xi.yaml, then these flags (flags win). Every
+setting except the token can also be changed on the agent's web page, http://<node>:8200/ui/,
+which saves it to xi.yaml.
+
+  --config PATH            Settings file (default: ./xi.yaml, else xi.yaml next to xi; created
+                           by the first save from the web page)
+  --coordinator URL        Coordinator base URL (without it, the agent waits to be configured)
+  --token TOKEN            Cluster token (default: env QWEN_CLUSTER_TOKEN; never stored in xi.yaml)
   --host HOST              Agent API interface (default 0.0.0.0)
-  --port PORT              Agent API port (default 8200)
+  --port PORT              Agent API and web page port (default 8200)
   --name NAME              node_id, unique in the cluster (default: hostname)
   --advertise-ip IP        IP other nodes use to reach this one (default: auto)
   --llama-dir DIR          Folder with rpc-server and llama-server (default ./llama.cpp)
@@ -38,6 +47,24 @@ Usage: xi --coordinator http://<control-ip>:8100 [options]
   --version                Print the version
 )";
 
+// Settings given as flags, as JSON with xi.yaml keys.
+xgi::json flag_settings(const xgi::CliArgs& args) {
+    static const std::set<std::string> ints{"port", "rpc_port", "head_port"};
+    static const std::set<std::string> doubles{"heartbeat_s", "exec_max_timeout_s"};
+    xgi::json j = xgi::json::object();
+    for (const auto& key : xi::settings_keys()) {
+        const std::string flag = xi::flag_for(key);
+        if (key == "allow_exec") {
+            if (args.has(flag)) j[key] = true;
+        } else if (args.has(flag)) {
+            if (ints.contains(key)) j[key] = args.get_int(flag, 0);
+            else if (doubles.contains(key)) j[key] = args.get_double(flag, 0);
+            else j[key] = args.get_or(flag, "");
+        }
+    }
+    return j;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -50,50 +77,45 @@ int main(int argc, char** argv) {
         std::cout << "xi " << xgi::kVersion << " (" << xgi::kPlatformName << ")\n";
         return 0;
     }
-    static const std::set<std::string> known = {
-        "--coordinator", "--token",  "--host",      "--port",           "--name",
-        "--advertise-ip", "--llama-dir", "--models-dir", "--log-dir",   "--rpc-port",
-        "--head-port",   "--rpc-server-bin", "--llama-server-bin", "--heartbeat-s", "--log-level",
-        "--allow-exec",  "--exec-dir",  "--exec-max-timeout-s"};
+    std::set<std::string> known = {"--config", "--token", "--log-level"};
+    for (const auto& k : xi::settings_keys()) known.insert(xi::flag_for(k));
     if (auto bad = args.unknown(known); !bad.empty()) {
         std::cerr << "xi: unknown option " << bad.front() << "\n\n" << kUsage;
         return 2;
     }
 
-    xi::AgentOptions o;
+    xi::AgentBoot boot;
     try {
-        o.coordinator = args.get_or("--coordinator", "");
-        if (o.coordinator.empty() || !xgi::parse_base_url(o.coordinator)) {
-            std::cerr << "xi: --coordinator http://<ip>:<port> is required\n\n" << kUsage;
-            return 2;
+        const auto exe = xgi::sysinfo::executable_path();
+        boot.file = xi::locate_settings(args.get("--config"), exe.empty() ? exe : exe.parent_path());
+        if (boot.file.found) {
+            std::ifstream f(boot.file.path, std::ios::binary);
+            std::stringstream ss;
+            ss << f.rdbuf();
+            boot.file_settings = xi::parse_settings_yaml(ss.str());
         }
-        o.token = args.get("--token").value_or(xgi::get_env(xgi::kTokenEnv).value_or(""));
-        o.host = args.get_or("--host", o.host);
-        o.port = args.get_int("--port", o.port);
-        o.name = args.get_or("--name", "");
-        o.advertise_ip = args.get_or("--advertise-ip", "");
-        if (auto v = args.get("--llama-dir")) o.llama_dir = xgi::path_from_utf8(*v);
-        if (auto v = args.get("--models-dir")) o.models_dir = xgi::path_from_utf8(*v);
-        if (auto v = args.get("--log-dir")) o.log_dir = xgi::path_from_utf8(*v);
-        o.rpc_port = args.get_int("--rpc-port", o.rpc_port);
-        o.head_port = args.get_int("--head-port", o.head_port);
-        if (auto v = args.get("--rpc-server-bin")) o.rpc_server_bin = xgi::path_from_utf8(*v);
-        if (auto v = args.get("--llama-server-bin")) o.llama_server_bin = xgi::path_from_utf8(*v);
-        o.heartbeat_s = args.get_double("--heartbeat-s", o.heartbeat_s);
-        if (o.heartbeat_s <= 0) throw std::invalid_argument("--heartbeat-s must be > 0");
-        o.allow_exec = args.has("--allow-exec");
-        if (auto v = args.get("--exec-dir")) o.exec_dir = xgi::path_from_utf8(*v);
-        o.exec_max_timeout_s = args.get_double("--exec-max-timeout-s", o.exec_max_timeout_s);
-        if (o.exec_max_timeout_s <= 0) throw std::invalid_argument("--exec-max-timeout-s must be > 0");
+        xgi::json flags = flag_settings(args);
+        for (auto it = flags.begin(); it != flags.end(); ++it) boot.cli_keys.insert(it.key());
+        boot.settings = xi::apply_json(boot.file_settings, flags);
+        if (auto t = args.get("--token")) {
+            boot.token = *t;
+            boot.token_source = "flag";
+        } else if (auto e = xgi::get_env(xgi::kTokenEnv); e && !e->empty()) {
+            boot.token = *e;
+            boot.token_source = "env";
+        }
     } catch (const std::exception& e) {
         std::cerr << "xi: " << e.what() << "\n";
         return 2;
     }
 
-    xgi::log::init("xi", o.log_dir, xgi::log::parse_level(args.get_or("--log-level", "info")));
+    xgi::log::init("xi", xgi::path_from_utf8(boot.settings.log_dir), xgi::log::parse_level(args.get_or("--log-level", "info")));
     xgi::ensure_sockets();
+    if (boot.settings.coordinator.empty())
+        xgi::log::warn("no coordinator set: open http://127.0.0.1:{}/ui/ on this node (or pass --coordinator)",
+                       boot.settings.port);
 
-    xi::Agent agent(o);
+    xi::Agent agent(boot);
     xgi::install_shutdown_handler([&agent] { agent.request_shutdown(); });
     bool ok = agent.run();
     agent.stop();

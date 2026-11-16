@@ -45,6 +45,7 @@ Code: `src/common` (config, HTTP, sysinfo), `src/xi` (agent, process supervisor)
 - [ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md) C++ implementation: XGI and XI
 - [ADR-008](adr/ADR-008-cross-platform-build.md) Cross-platform: Windows, Linux, macOS, any C++20 compiler
 - [ADR-009](adr/ADR-009-web-console-and-node-code-execution.md) Web console and opt-in code execution on nodes
+- [ADR-010](adr/ADR-010-agent-web-page-and-runtime-settings.md) XI web page and runtime settings (xi.yaml)
 
 ## Claude skills (`.claude/skills/`)
 

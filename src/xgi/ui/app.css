@@ -298,3 +298,7 @@ dialog input[type=password] { width: 100%; }
   .config-view { padding: 10px; }
   .cfg-body { overflow: visible; }
 }
+
+a.button-link { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 7px; padding: 6px 12px;
+                color: var(--text); text-decoration: none; background: var(--panel); }
+a.button-link:hover { border-color: var(--accent); }

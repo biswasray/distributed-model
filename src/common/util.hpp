@@ -2,6 +2,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -32,6 +33,10 @@ std::string join(const std::vector<std::string>& parts, std::string_view sep);
 
 // Formats a double the shortest way that round-trips ("1", "0.5"), as llama.cpp expects.
 std::string format_number(double v);
+
+// Writes `text` to `path` via a temporary file and a rename, so readers never see half a file.
+// An existing file is first copied to <path>.bak. Creates parent folders. Returns "" or an error.
+std::string write_file_atomic(const std::filesystem::path& path, const std::string& text);
 
 // Cooperative cancellation (a portable stand-in for std::stop_source / std::stop_token,
 // which older libc++ versions lack).

@@ -184,30 +184,10 @@ ConfigCheck ConfigStore::check_json(const json& config) const {
 
 ConfigCheck ConfigStore::save(ConfigCheck c) {
     if (!c.ok) return c;
-    std::error_code ec;
     const fs::path& path = where_.path;
-    if (path.has_parent_path()) fs::create_directories(path.parent_path(), ec);
-    fs::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        f << c.yaml;
-        if (!f) {
-            c.ok = false;
-            c.error = "cannot write " + path_to_utf8(tmp);
-            return c;
-        }
-    }
-    if (fs::exists(path, ec)) {
-        fs::path bak = path;
-        bak += ".bak";
-        fs::copy_file(path, bak, fs::copy_options::overwrite_existing, ec);
-    }
-    fs::rename(tmp, path, ec);
-    if (ec) {
+    if (std::string err = write_file_atomic(path, c.yaml); !err.empty()) {
         c.ok = false;
-        c.error = "cannot replace " + path_to_utf8(path) + ": " + ec.message();
-        fs::remove(tmp, ec);
+        c.error = err;
         return c;
     }
 

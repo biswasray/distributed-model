@@ -87,7 +87,7 @@ for n in a b c; do
     # shellcheck disable=SC2086
     "$XI" $EXEC_FLAGS --coordinator "$COORD" --token "$TOKEN" --name "node-$n" --host 127.0.0.1 --advertise-ip 127.0.0.1 \
         --port $((19200 + i)) --rpc-port $((50260 + i)) --head-port $((19080 + i)) --heartbeat-s 1 \
-        --models-dir "$WORK/models-$n" --log-dir "$WORK/logs-$n" \
+        --models-dir "$WORK/models-$n" --log-dir "$WORK/logs-$n" --config "$WORK/xi-$n.yaml" \
         --rpc-server-bin "$MOCK_RPC" --llama-server-bin "$MOCK_LLAMA" > "$WORK/xi-$n.out" 2>&1 &
     eval "XI_PID_$n=$!"
     PIDS="$PIDS $!"

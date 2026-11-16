@@ -38,6 +38,7 @@
 | T10 | Console code execution abused, or a generated program does damage ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)) | Off by default. Needs both `console.allow_exec: true` and `xi --allow-exec`. Token on every call. Generated code is shown for review and never auto-run. Timeout, 2 jobs per node, 256 KB code limit, process tree killed at timeout. Every run is logged. | **High on exec-enabled nodes:** the token = code execution as the agent's account (SYSTEM for the scheduled task). No sandbox, no per-user identity. |
 | T11 | A malicious page or node data attacks the operator's browser | Console served with a strict CSP, `X-Frame-Options: DENY`, `nosniff`. All node data rendered as text. The API needs a custom header, so other sites can't call it cross-origin. | The token in `localStorage` (only if *Remember* is ticked) can be read by anyone using that browser profile |
 | T12 | The cluster config is changed through the console (for example `console.allow_exec` turned on, or pools pointed at another model file) | `PUT /console/config` needs the token. The same validation as at startup. Every save is logged with the caller's address, and the old file is kept as `cluster.yaml.bak`. The form never receives the token; the YAML view shows the file as it is, so keep the token in `QWEN_CLUSTER_TOKEN` rather than in `cluster.yaml`. | A token holder can already control the cluster. Turning on `allow_exec` still needs `xi --allow-exec` on each node. |
+| T13 | A token holder changes a node's settings on its agent page (another coordinator URL, other folders, or code execution) ([ADR-010](../adr/ADR-010-agent-web-page-and-runtime-settings.md)) | `PUT /agent/settings` needs the token and is validated and logged with the caller's address; `xi.yaml.bak` keeps the previous file. **Code execution can only be turned on from the node itself** (loopback), with `--allow-exec`, or in `xi.yaml`. The token is never stored in `xi.yaml`. | A token holder can point a node at a rogue coordinator, which already holds the same power over that node. |
 
 ## 4. Required hardening checklist
 
@@ -47,6 +48,7 @@
 - [ ] `router.api_keys` is set if anyone other than operators can reach port 8000.
 - [ ] No router port forwarding or UPnP for these ports.
 - [ ] The same llama.cpp release is on all nodes, from the official GitHub releases only.
+- [ ] Agent port 8200 (API and web page) is reachable only from the cluster subnet. Code execution is turned on per node only by someone at that node.
 - [ ] `console.allow_exec` stays `false` unless you need it. If you turn it on, start `xi --allow-exec` only on the nodes that need it, and preferably run those agents as a dedicated non-admin user instead of SYSTEM.
 
 ## 5. Token rotation

@@ -2,13 +2,15 @@
 # Registers XI (xi) as a boot-time service on Linux (systemd) or macOS (launchd).
 # The Linux/macOS counterpart of install-xi-task.ps1 (architecture/02-node-agent.md §8).
 #
-# Usage (as root):  sudo ./install-xi-service.sh http://192.168.1.10:8100 [/opt/qwen-cluster]
+# Usage (as root):  sudo ./install-xi-service.sh [http://192.168.1.10:8100] [/opt/qwen-cluster]
+# Settings live in <root>/xi.yaml (created if missing; the agent web page edits it). Without a
+# coordinator URL the agent starts and waits: set it on http://127.0.0.1:8200/ui/.
 # Set XI_ALLOW_EXEC=1 to let the XGI web console run code on this node (ADR-009; runs as root).
 # The token is read from /etc/qwen-cluster.env (QWEN_CLUSTER_TOKEN=...), which this script
 # creates with mode 600 if it is missing.
 set -eu
 
-COORDINATOR="${1:?usage: $0 <coordinator-url> [root-dir]}"
+COORDINATOR="${1:-}"
 ROOT="${2:-/opt/qwen-cluster}"
 XI="$ROOT/bin/xi"
 ENV_FILE=/etc/qwen-cluster.env
@@ -20,10 +22,31 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "created $ENV_FILE: put the cluster token in it" >&2
 fi
 
-ARGS="--coordinator $COORDINATOR --llama-dir $ROOT/llama.cpp --models-dir $ROOT/models --log-dir $ROOT/logs"
+SETTINGS="$ROOT/xi.yaml"
+if [ ! -f "$SETTINGS" ]; then
+    cat > "$SETTINGS" <<EOF
+# XI node agent settings (architecture/02-node-agent.md section 10). Also editable on the
+# agent web page. The cluster token is NOT stored here (use QWEN_CLUSTER_TOKEN).
+coordinator: '$COORDINATOR'
+llama_dir: '$ROOT/llama.cpp'
+models_dir: '$ROOT/models'
+log_dir: '$ROOT/logs'
+exec_dir: '$ROOT/exec'
+EOF
+    echo "created $SETTINGS"
+elif [ -n "$COORDINATOR" ]; then
+    if grep -q '^coordinator:' "$SETTINGS"; then
+        sed -i.bak "s|^coordinator:.*|coordinator: '$COORDINATOR'|" "$SETTINGS"
+    else
+        echo "coordinator: '$COORDINATOR'" >> "$SETTINGS"
+    fi
+    echo "set coordinator in $SETTINGS (other settings kept)"
+fi
+
+ARGS="--config $SETTINGS"
 if [ "${XI_ALLOW_EXEC:-0}" = 1 ]; then
     echo "warning: console code execution is ON: the cluster token can run programs on this machine" >&2
-    ARGS="$ARGS --allow-exec --exec-dir $ROOT/exec"
+    ARGS="$ARGS --allow-exec"
 fi
 
 case "$(uname -s)" in

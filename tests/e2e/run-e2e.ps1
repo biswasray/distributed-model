@@ -129,7 +129,7 @@ spares: 1
         $agents["node-$n"] = Start-Bg "xi-$n" $Xi ($execFlags + @(
             '--coordinator', $coord, '--name', "node-$n", '--host', '127.0.0.1', '--advertise-ip', '127.0.0.1',
             '--port', (18200 + $i), '--rpc-port', (50160 + $i), '--head-port', (18080 + $i), '--heartbeat-s', '1',
-            '--models-dir', "`"$WorkDir\models-$n`"", '--log-dir', "`"$WorkDir\logs-$n`"",
+            '--models-dir', "`"$WorkDir\models-$n`"", '--log-dir', "`"$WorkDir\logs-$n`"", '--config', "`"$WorkDir\xi-$n.yaml`"",
             '--rpc-server-bin', "`"$MockRpc`"", '--llama-server-bin', "`"$MockLlama`""))
     }
     Check (WaitFor { @(Nodes | Where-Object { $_.status -eq 'alive' }).Count -eq 4 } 20 '4 nodes') '4 agents registered'
@@ -205,6 +205,27 @@ spares: 1
     $cf2 = (Call GET "$coord/console/config" $null $T).Json
     Check ($cf2.running.console.max_tokens -eq 777 -and $cf2.running.router.max_queue -eq 4 -and @($cf2.restart_pending) -contains 'router.max_queue') 'live setting applied, restart-only setting pending'
     Check ((Get-Content (Join-Path $WorkDir 'cluster.yaml') -Raw) -match 'e2e-token' -and (Test-Path (Join-Path $WorkDir 'cluster.yaml.bak'))) 'saved file keeps the token and a .bak copy'
+
+    # --- XI agent page and runtime settings (ADR-010)
+    $agentB = 'http://127.0.0.1:18202'
+    $xp = Call GET "$agentB/ui/"
+    Check ($xp.Status -eq 200 -and $xp.Text -match '<title>XI Agent</title>' -and (Call GET "$agentB/ui/app.css").Status -eq 200) 'agent serves its web page (and the shared stylesheet) without a token'
+    Check ((Call GET "$agentB/agent/state").Status -eq 401) 'agent page API requires X-Cluster-Token'
+    $as = (Call GET "$agentB/agent/state" $null $T).Json
+    Check ($as.link.state -eq 'registered' -and $as.node.node_id -eq 'node-b') 'GET /agent/state: registered with the coordinator'
+    $sg = (Call GET "$agentB/agent/settings" $null $T).Json
+    Check (-not $sg.file_exists -and $sg.cli_flags.heartbeat_s -eq '--heartbeat-s' -and $sg.local_request) 'GET /agent/settings shows flags and that xi.yaml is not created yet'
+    $ps = Call PUT "$agentB/agent/settings" @{ settings = @{ exec_max_timeout_s = 120; rpc_port = 50999 } } $T
+    Check ($ps.Status -eq 200 -and @($ps.Json.live) -contains 'exec_max_timeout_s' -and @($ps.Json.restart) -contains 'rpc_port' -and (Test-Path (Join-Path $WorkDir 'xi-b.yaml'))) 'PUT /agent/settings applies live keys, defers restart keys, creates xi.yaml'
+    $sg = (Call GET "$agentB/agent/settings" $null $T).Json
+    Check ($sg.running.exec_max_timeout_s -eq 120 -and $sg.running.rpc_port -eq 50162 -and @($sg.restart_pending) -contains 'rpc_port') 'running settings updated; rpc_port waits for a restart'
+    Check ((Call PUT "$agentB/agent/settings" @{ settings = @{ port = 'x' } } $T).Status -eq 400) 'invalid agent setting -> 400'
+    $hb = Call PUT "$agentB/agent/settings" @{ settings = @{ heartbeat_s = 1.5 } } $T
+    Check ($hb.Status -eq 200 -and @($hb.Json.warnings).Count -ge 1) 'changing a setting that is also a flag warns that the flag wins at restart'
+    $en = Call PUT "$agentB/agent/settings" @{ settings = @{ allow_exec = $true } } $T
+    Check ($en.Status -eq 200 -and (WaitFor { (Nodes | Where-Object { $_.node_id -eq 'node-b' }).exec_enabled -eq $true } 10 'exec on')) 'exec turned on from this machine (loopback) reaches the coordinator'
+    $off = Call PUT "$agentB/agent/settings" @{ settings = @{ allow_exec = $false } } $T
+    Check ($off.Status -eq 200 -and (Call POST "$agentB/exec" @{ language = $lang; code = $code } $T).Status -eq 403) 'exec turned off again takes effect at once'
 
     # --- failover: kill the worker's agent (its rpc-server dies with it)
     $victim = $pair.workers[0]

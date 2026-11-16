@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <format>
+#include <fstream>
 
 namespace xgi {
 
@@ -103,6 +104,31 @@ void StopSource::request_stop() {
         state_->stopped = true;
     }
     state_->cv.notify_all();
+}
+
+std::string write_file_atomic(const std::filesystem::path& path, const std::string& text) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (path.has_parent_path()) fs::create_directories(path.parent_path(), ec);
+    fs::path tmp = path;
+    tmp += ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        f << text;
+        if (!f) return "cannot write " + tmp.string();
+    }
+    if (fs::exists(path, ec)) {
+        fs::path bak = path;
+        bak += ".bak";
+        fs::copy_file(path, bak, fs::copy_options::overwrite_existing, ec);
+    }
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        std::string err = "cannot replace " + path.string() + ": " + ec.message();
+        fs::remove(tmp, ec);
+        return err;
+    }
+    return {};
 }
 
 }  // namespace xgi

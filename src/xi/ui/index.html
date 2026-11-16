@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XI Agent</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="xi.css">
+<script src="xi.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">◇</span>
+    <span class="brand-name">XI Agent</span>
+    <span class="node-title" id="node-title"></span>
+    <span class="muted" id="version"></span>
+  </div>
+  <nav class="tabs" aria-label="Views">
+    <button type="button" class="tab active" data-view="status">Status</button>
+    <button type="button" class="tab" data-view="settings">Settings</button>
+  </nav>
+  <div class="summary" id="summary" aria-live="polite"></div>
+  <div class="top-actions">
+    <span class="refresh" id="refresh-state"></span>
+    <button type="button" class="ghost" id="token-btn" title="Set the cluster token">🔑 Token</button>
+  </div>
+</header>
+
+<main class="xi-status" id="status-view">
+  <section class="panel">
+    <div class="panel-head"><h2>Coordinator</h2>
+      <button type="button" class="small" id="reregister-btn" title="Register with the coordinator again now">Re-register</button>
+    </div>
+    <div class="panel-body" id="link-body"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>System</h2></div>
+    <div class="panel-body" id="system-body"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>llama.cpp</h2></div>
+    <div class="panel-body" id="llama-body"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Languages</h2>
+      <button type="button" class="small" id="detect-btn" title="Look for interpreters and compilers on PATH again">Detect again</button>
+    </div>
+    <div class="panel-body" id="lang-body"></div>
+  </section>
+
+  <section class="panel wide">
+    <div class="panel-head"><h2>Process output</h2>
+      <div class="panel-tools">
+        <select id="log-role" aria-label="Process">
+          <option value="head">llama-server (head)</option>
+          <option value="rpc">rpc-server (worker)</option>
+        </select>
+        <select id="log-lines" aria-label="Lines">
+          <option value="50">50 lines</option>
+          <option value="200" selected>200 lines</option>
+          <option value="500">500 lines</option>
+        </select>
+        <button type="button" class="small" id="log-refresh">Refresh</button>
+      </div>
+    </div>
+    <pre class="log" id="log-body">…</pre>
+  </section>
+</main>
+
+<main class="config-view" id="settings-view" hidden>
+  <section class="panel config-panel" aria-labelledby="set-title">
+    <div class="panel-head"><h2 id="set-title">Agent settings</h2></div>
+    <div class="cfg-status" id="set-status"></div>
+    <div class="cfg-body">
+      <div id="set-form" class="cfg-form"></div>
+      <div class="cfg-result" id="set-result" hidden></div>
+    </div>
+    <div class="cfg-actions">
+      <button type="button" class="ghost" id="set-reload">Discard changes</button>
+      <span class="spacer"></span>
+      <button type="button" class="primary" id="set-save">Save &amp; apply</button>
+    </div>
+  </section>
+</main>
+
+<dialog id="token-dialog">
+  <form method="dialog" id="token-form">
+    <h2>Cluster token</h2>
+    <p>This page calls the agent's API, which needs the cluster token (<code>QWEN_CLUSTER_TOKEN</code>).
+      It is kept in this browser tab only, unless you choose to remember it.</p>
+    <label>Token <input type="password" id="token-input" autocomplete="off" spellcheck="false"></label>
+    <label class="check"><input type="checkbox" id="token-remember"> Remember on this browser</label>
+    <p class="error" id="token-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" id="token-forget">Forget token</button>
+      <button type="submit" class="primary" value="ok">Connect</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

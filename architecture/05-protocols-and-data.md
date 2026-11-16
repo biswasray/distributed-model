@@ -8,7 +8,7 @@
 |---|---|---|---|---|
 | 8000 | HTTP | Router | Clients | Optional `Authorization: Bearer` |
 | 8100 | HTTP | Coordinator (and the web console at `/ui/`) | Agents, router, operators, browsers | `X-Cluster-Token` (except `/health`, `/` and `/ui/*`) |
-| 8200 | HTTP | Node Agent | Coordinator | `X-Cluster-Token` |
+| 8200 | HTTP | Node Agent (and its web page at `/ui/`) | Coordinator, browsers | `X-Cluster-Token` (except `/`, `/ui/*`) |
 | 8080 | HTTP | `llama-server` (head) | Router, coordinator (health) | **None**. Restrict with the firewall. |
 | 50052 | TCP (llama.cpp RPC) | `rpc-server` (worker) | That group's head | **None**. Restrict with the firewall. |
 
@@ -231,6 +231,54 @@ The full node facts, with the same shape as the `/register` body.
 {"role": "head", "lines": ["...", "..."]}
 ```
 
+### Agent web page ([ADR-010](../adr/ADR-010-agent-web-page-and-runtime-settings.md))
+
+`GET /` redirects to `/ui/`. `GET /ui/{index.html, app.css, xi.css, xi.js}` need **no token**. The calls below need `X-Cluster-Token`.
+
+#### `GET /agent/state`
+
+```json
+{"version": "0.2.0", "started_at": 1762761600.0, "exec_jobs": 0,
+ "node": { "...": "the same facts as GET /status" },
+ "link": {"state": "registered", "coordinator": "http://192.168.1.10:8100", "node_id": "LAB-PC-07",
+          "last_error": "", "registered_at": 1762761601.2, "last_heartbeat_ok": 1762761720.4}}
+```
+
+`link.state` is `not_configured` (no coordinator URL), `registering`, `registered` or `error` (see `last_error`).
+
+#### `GET /agent/settings`
+
+```json
+{
+  "path": "C:\\qwen-cluster\\xi.yaml", "file_exists": true,
+  "configured": { "<xi.yaml keys>": "what the file says, with command-line flags applied" },
+  "running":    { "<xi.yaml keys>": "what is in effect now" },
+  "keys": ["coordinator", "name", "..."],
+  "restart_keys": ["head_port", "host", "log_dir", "port", "rpc_port"],
+  "restart_pending": ["rpc_port"],
+  "cli_flags": {"log_dir": "--log-dir"},
+  "token_set": true, "token_source": "env",
+  "local_request": false,
+  "defaults": {"name": "LAB-PC-07", "advertise_ip": "192.168.1.27", "rpc_server_bin": "llama.cpp\\rpc-server.exe", "llama_server_bin": "..."}
+}
+```
+
+`token_source` is `flag`, `env`, `ui` (changed on the page, not saved) or `none`. `local_request` is true when the caller is on the node itself (loopback), the only place `allow_exec` can be turned on.
+
+#### `PUT /agent/settings`
+
+```json
+{"settings": {"coordinator": "http://192.168.1.10:8100", "exec_max_timeout_s": 120}, "token": "optional new token"}
+```
+
+`settings` holds only the keys to change (§5.2). The whole file is validated and written atomically (the old one is kept as `xi.yaml.bak`). Every key applies at once except the restart keys. A live change makes the agent re-register. `token`, if not empty, replaces the token for the running process only and is **not** saved.
+
+Response `200`: `{"ok": true, "path": "...", "live": ["coordinator"], "restart": ["rpc_port"], "warnings": ["..."]}`. `warnings` covers keys that are also command-line flags (the flag wins at the next start) and an unsaved token. Errors: `400` invalid setting · `403` `allow_exec: true` from a non-loopback address, while it is off · `500` the file can't be written.
+
+#### `POST /agent/register` · `POST /agent/runtimes/detect`
+
+`register` → `202`: re-register with the coordinator now. `runtimes/detect` → `200 {"runtimes": [...]}`: probe `PATH` for language runtimes again (takes a few seconds; `409` if one is already running), then re-register.
+
 ### `POST /exec`
 
 Runs a program with one of the node's detected `runtimes` ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)). Only available when the agent runs with `--allow-exec`.
@@ -349,6 +397,35 @@ pinned:                      # optional: prefer these nodes as heads for a pool
 Environment `QWEN_CLUSTER_TOKEN` › `cluster.yaml` › built-in defaults.
 
 The console calls the router with the first entry of `router.api_keys` (if any), so the coordinator and router must read the same `cluster.yaml`.
+
+### 5.2 `xi.yaml` (node agent settings)
+
+Read by `xi` at startup: `--config PATH`, else `./xi.yaml`, else `xi.yaml` next to the executable. A missing file means defaults (the first save from the agent page creates it). **Precedence: built-in defaults < `xi.yaml` < command-line flags.** Every key has the flag `--<key with - for _>`.
+
+```yaml
+coordinator: "http://192.168.1.10:8100"   # "" = not configured: the agent waits
+name: ""                     # node_id; "" = hostname
+advertise_ip: ""             # "" = the route to the coordinator
+heartbeat_s: 5
+llama_dir: "llama.cpp"
+rpc_server_bin: ""           # "" = <llama_dir>/rpc-server[.exe]
+llama_server_bin: ""         # "" = <llama_dir>/llama-server[.exe]
+models_dir: "models"
+allow_exec: false            # can only be turned ON locally (ADR-010)
+exec_dir: "exec"
+exec_max_timeout_s: 300
+host: "0.0.0.0"              # restart keys from here down
+port: 8200
+log_dir: "logs"
+rpc_port: 50052
+head_port: 8080
+```
+
+| Rule | Error |
+|---|---|
+| Unknown key, or `token` / `cluster_token` (the token is never stored here) | Startup fails |
+| `coordinator` is empty or an `http://host:port` URL | Startup fails |
+| Ports 1–65535 and all different; `heartbeat_s`, `exec_max_timeout_s` > 0; folders not empty | Startup fails |
 
 ### 5.1 Where XGI finds `cluster.yaml`, and changing it while running
 

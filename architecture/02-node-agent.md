@@ -18,8 +18,9 @@ The agent has **no scheduling logic**. It never decides on its own to start or s
 
 | Flag | Default | Description |
 |---|---|---|
-| `--coordinator` | *(required)* | Coordinator base URL, e.g. `http://192.168.1.10:8100` |
-| `--token` | env `QWEN_CLUSTER_TOKEN` | Shared cluster token |
+| `--config` | `./xi.yaml`, else `xi.yaml` next to `xi` | Settings file (§10). Every other flag except `--token` and `--log-level` is also a key in it. |
+| `--coordinator` | *(none)* | Coordinator base URL, e.g. `http://192.168.1.10:8100`. Without it the agent starts and waits until one is set on its web page. |
+| `--token` | env `QWEN_CLUSTER_TOKEN` | Shared cluster token. Never stored in `xi.yaml`. |
 | `--host` / `--port` | `0.0.0.0` / `8200` | Interface and port for the agent API |
 | `--name` | hostname | `node_id`. It must be unique in the cluster. |
 | `--advertise-ip` | auto | The IP other nodes use to reach this one. Auto-detected from the route to the coordinator. |
@@ -64,6 +65,10 @@ All endpoints require `X-Cluster-Token` when a token is configured. Request and 
 | POST | `/stop` | Stop `rpc`, `head`, or `all` |
 | GET | `/logs/{role}?lines=N` | The last N lines (up to 500) of a child process's output |
 | POST | `/exec` | Run a console program (only with `--allow-exec`, §9) |
+| GET | `/`, `/ui/…` | The agent's web page (§10). **No authentication.** |
+| GET / PUT | `/agent/settings` | Read or change settings (§10) |
+| GET | `/agent/state` | Registration state, facts and process states for the page |
+| POST | `/agent/register` · `/agent/runtimes/detect` | Re-register now · probe language runtimes again |
 
 ### 4.1 Command lines the agent builds
 
@@ -109,7 +114,7 @@ llama-server -m <models_dir>/<model_file> --host 0.0.0.0 --port <head_port>
 
 ## 8. Running as a service
 
-On Windows, register the agent as a Task Scheduler task that runs **at startup as SYSTEM**. The command is in the [setup guide §7.6](../distributed-qwen-cluster.md#76-run-the-node-agent-as-a-startup-service). On Linux it runs as a systemd unit, and on macOS as a launchd daemon (`scripts/install-xi-service.sh`).
+The install scripts write `<root>\xi.yaml` (if it doesn't exist) and start `xi --config <root>\xi.yaml`, so changes made on the agent page survive restarts. On Windows, register the agent as a Task Scheduler task that runs **at startup as SYSTEM**. The command is in the [setup guide §7.6](../distributed-qwen-cluster.md#76-run-the-node-agent-as-a-startup-service). On Linux it runs as a systemd unit, and on macOS as a launchd daemon (`scripts/install-xi-service.sh`).
 
 Also on each node: turn off sleep and hibernation, and set the Wi-Fi adapter power mode to *Maximum Performance*.
 
@@ -139,3 +144,23 @@ At startup the agent looks for each known runtime on `PATH` and runs its version
 Each run is logged in `xi.log`, and its output is appended to `logs/exec.log`.
 
 > ⚠️ Programs run with the agent's account and rights. The scheduled task runs as **SYSTEM**, so on Windows a console program can do anything on that PC. Only use `--allow-exec` on nodes where that is acceptable, or run the agent as a dedicated low-privilege user ([06-security.md](06-security.md) T10).
+
+## 10. Web page and runtime settings
+
+[ADR-010](../adr/ADR-010-agent-web-page-and-runtime-settings.md). Open `http://<node>:8200/ui/` (on the node itself: `http://127.0.0.1:8200/ui/`). The page is plain HTML/CSS/JS embedded in `xi` (with XGI's stylesheet), loads without a token, and sends `X-Cluster-Token` on every call. The XGI console's node panel links to it.
+
+- **Status tab:** coordinator link (state, last heartbeat, last error, *Re-register*), system facts, the llama.cpp processes and binaries, model files, languages (*Detect again*), and the last 50–500 lines of `llama-server` or `rpc-server` output.
+- **Settings tab:** a form over the `xi.yaml` keys ([05 §5.2](05-protocols-and-data.md#52-xiyaml-node-agent-settings)). Each section shows *applies now* or *after restart*. A setting also passed as a flag is marked with that flag: the flag wins again at the next start.
+
+| Applies at once | After an XI restart |
+|---|---|
+| `coordinator`, `name`, `advertise_ip`, `heartbeat_s`, `llama_dir`, `rpc_server_bin`, `llama_server_bin`, `models_dir`, `allow_exec`, `exec_dir`, `exec_max_timeout_s`, and the token (not saved) | `host`, `port`, `log_dir`, `rpc_port`, `head_port` |
+
+How a save works:
+
+1. The new settings are validated and written to `xi.yaml` atomically (the previous file is kept as `xi.yaml.bak`).
+2. The live keys replace the running ones under a lock. Request handlers read a snapshot, so a request sees either the old or the new settings, never a mix.
+3. The control loop wakes up and registers again (new coordinator, name, IP, models or exec state). Renaming the node, or moving it to another coordinator, leaves the old record to go dead after `node_timeout_s`, and its group is repaired.
+4. llama.cpp folder and binary changes apply to the next `/rpc/start` or `/head/start`. Running processes are not touched.
+
+**`allow_exec` can only be turned on locally:** from a loopback address (a browser on the node), with `--allow-exec`, or by editing `xi.yaml`. A remote save that turns it on gets `403`. Turning it off works from anywhere, and takes effect at once.

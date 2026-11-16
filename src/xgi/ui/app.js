@@ -377,6 +377,9 @@
     const actions = h("div", { class: "detail-actions" },
       h("button", { type: "button", class: "primary", disabled: n.status !== "alive", onclick: () => { selectTarget(n.node_id); closeDetail(); $("prompt").focus(); } }, "Use in code console"),
       h("button", { type: "button", onclick: () => drain(n, !n.draining) }, n.draining ? "Undrain" : "Drain"),
+      // Always http:// + the registered address, so node data can't turn this into another kind of link.
+      h("a", { class: "button-link", href: `http://${n.ip}:${Number(n.agent_port) || 8200}/ui/`, target: "_blank", rel: "noopener noreferrer",
+        title: "This node's XI page: status, logs and agent settings" }, "Open agent page ↗"),
     );
 
     $("detail-body").replaceChildren(

@@ -81,7 +81,34 @@ if(WIN32)
     target_link_libraries(xgi_common PUBLIC ws2_32 advapi32)
 endif()
 
+# ---------------------------------------------------------------- web pages
+# The XGI console and the XI page are plain HTML/CSS/JS, embedded into the binaries at build time
+# (cmake/EmbedAssets.cmake) so each stays one file. Entries are files under ROOT, or
+# "<served name>=<absolute path>" for a file elsewhere.
+function(xgi_embed_ui OUT NAMESPACE HEADER ROOT)
+    set(deps "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedAssets.cmake")
+    foreach(entry IN LISTS ARGN)
+        if(entry MATCHES "^([^=]+)=(.+)$")
+            list(APPEND deps "${CMAKE_MATCH_2}")
+        else()
+            list(APPEND deps "${ROOT}/${entry}")
+        endif()
+    endforeach()
+    list(JOIN ARGN "," list)
+    add_custom_command(
+        OUTPUT "${OUT}"
+        COMMAND "${CMAKE_COMMAND}" "-DROOT=${ROOT}" "-DFILES=${list}" "-DOUT=${OUT}" "-DNAMESPACE=${NAMESPACE}"
+                "-DHEADER=${HEADER}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedAssets.cmake"
+        DEPENDS ${deps}
+        COMMENT "Embedding web page files for ${NAMESPACE}"
+        VERBATIM)
+endfunction()
+
 # ---------------------------------------------------------------- XI (node agent)
+set(XI_UI_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/xi_ui_assets.cpp")
+xgi_embed_ui("${XI_UI_CPP}" xi::ui xi/ui_assets.hpp "${CMAKE_CURRENT_SOURCE_DIR}/src/xi/ui"
+    index.html xi.js "app.css=${CMAKE_CURRENT_SOURCE_DIR}/src/xgi/ui/app.css" xi.css)
+
 if(WIN32)
     set(XI_PROCESS_SRC src/xi/process_windows.cpp)
 else()
@@ -92,6 +119,8 @@ add_library(xi_lib STATIC
     src/xi/commands.cpp
     src/xi/process.cpp
     src/xi/runtimes.cpp
+    src/xi/settings.cpp
+    "${XI_UI_CPP}"
     ${XI_PROCESS_SRC}
 )
 target_link_libraries(xi_lib PUBLIC xgi_common)
@@ -100,18 +129,9 @@ add_executable(xi src/xi/main.cpp)
 target_link_libraries(xi PRIVATE xi_lib)
 
 # ---------------------------------------------------------------- XGI (coordinator + router)
-# The console UI (plain HTML/CSS/JS) is embedded into the binary at build time.
-set(XGI_UI_FILES index.html app.css app.js)
-list(TRANSFORM XGI_UI_FILES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/src/xgi/ui/" OUTPUT_VARIABLE XGI_UI_DEPS)
-list(JOIN XGI_UI_FILES "," XGI_UI_LIST)
 set(XGI_UI_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/ui_assets.cpp")
-add_custom_command(
-    OUTPUT "${XGI_UI_CPP}"
-    COMMAND "${CMAKE_COMMAND}" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}/src/xgi/ui" "-DFILES=${XGI_UI_LIST}"
-            "-DOUT=${XGI_UI_CPP}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedAssets.cmake"
-    DEPENDS ${XGI_UI_DEPS} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedAssets.cmake"
-    COMMENT "Embedding console UI"
-    VERBATIM)
+xgi_embed_ui("${XGI_UI_CPP}" xgi::ui xgi/ui_assets.hpp "${CMAKE_CURRENT_SOURCE_DIR}/src/xgi/ui"
+    index.html app.css app.js)
 
 add_library(xgi_lib STATIC
     src/xgi/config_store.cpp

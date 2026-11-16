@@ -327,7 +327,7 @@ C:\qwen-cluster\scripts\install-xi-task.ps1 -Coordinator http://192.168.1.10:810
 Start-ScheduledTask -TaskName QwenNodeAgent
 ```
 
-The script registers `C:\qwen-cluster\bin\xi.exe --coordinator ... --llama-dir C:\qwen-cluster\llama.cpp --models-dir C:\qwen-cluster\models --log-dir C:\qwen-cluster\logs` as the `QwenNodeAgent` task (at startup, as SYSTEM, restarted if it exits). Run `xi --help` to see every flag.
+The script writes `C:\qwen-cluster\xi.yaml` (the coordinator URL and the `llama.cpp`, `models`, `logs` and `exec` folders) if it doesn't exist yet, and registers `C:\qwen-cluster\bin\xi.exe --config C:\qwen-cluster\xi.yaml` as the `QwenNodeAgent` task (at startup, as SYSTEM, restarted if it exits). `-Coordinator` is optional: without it, set the URL later on the agent page (§12.2). Run `xi --help` to see every setting.
 
 ---
 
@@ -577,6 +577,15 @@ Running code is **off by default**. To turn it on:
    ```
 
 > ⚠️ The program runs with the agent's rights. That is **SYSTEM** for the scheduled task. Anyone with the cluster token can then run anything on those PCs. Enable it only on nodes where that's acceptable. Programs on a serving node also take CPU and RAM from inference. See [06-security.md](architecture/06-security.md) T10.
+
+### 12.2 Node agent page
+
+Each node has its own page at `http://<node-ip>:8200/ui/` (on the node itself, `http://127.0.0.1:8200/ui/`). The XGI console's node panel has an **Open agent page** link.
+
+- **Status:** is the node registered (and if not, why), its system facts, llama.cpp processes and their recent output, model files and languages.
+- **Settings:** coordinator URL, node name, advertised IP, heartbeat, folders, binaries and code-execution settings apply at once. The agent port, log folder and llama.cpp ports apply after the agent restarts (`Stop-ScheduledTask -TaskName QwenNodeAgent; Start-ScheduledTask -TaskName QwenNodeAgent`). Saved settings go to `C:\qwen-cluster\xi.yaml`.
+- A new node needs no coordinator URL at install time: install the task, open `http://127.0.0.1:8200/ui/#settings` on the node, and set it there.
+- **Code execution can only be switched on at the node itself** (from its own browser, `-AllowExec` at install, or by editing `xi.yaml`). It can be switched off from anywhere.
 
 ---
 

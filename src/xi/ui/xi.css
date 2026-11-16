@@ -1,0 +1,38 @@
+/* XI page: layout on top of the shared XGI stylesheet (app.css). */
+.node-title { font-weight: 600; color: var(--accent); }
+.xi-status {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 14px;
+  padding: 14px;
+  grid-auto-rows: max-content;  /* rows fit their content; the page scrolls */
+  align-content: start;
+}
+.xi-status .panel { overflow: visible; min-height: auto; }
+.xi-status .panel.wide { grid-column: 1 / -1; }
+.panel-body { padding: 4px 14px 14px; }
+.panel-body .kv { grid-template-columns: 150px 1fr; }
+pre.log {
+  margin: 0;
+  padding: 10px 14px;
+  min-height: 160px;
+  max-height: 420px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  background: var(--code-bg);
+  color: var(--code-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.models { display: flex; flex-direction: column; gap: 2px; }
+.cfg-field input:disabled { opacity: .6; }
+.cfg-label .badge { font-weight: 600; }
+@media (max-width: 1000px) {
+  .xi-status { grid-template-columns: 1fr; overflow: visible; }
+}
