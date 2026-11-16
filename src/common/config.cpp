@@ -49,6 +49,11 @@ const PoolConfig* ClusterConfig::find_pool(const std::string& name) const {
     return nullptr;
 }
 
+std::string ClusterConfig::console_model() const {
+    if (!console.model.empty()) return console.model;
+    return pools.empty() ? std::string() : pools.front().name;
+}
+
 int ClusterConfig::total_nodes_requested() const {
     int total = 0;
     for (const auto& p : pools) total += p.nodes_per_group * p.groups;
@@ -81,7 +86,7 @@ ClusterConfig parse_config(const std::string& yaml_text, const std::optional<std
     if (!root || !root.IsMap()) throw ConfigError("cluster.yaml: top level must be a mapping");
 
     ClusterConfig c;
-    warn_unknown(root, {"cluster_token", "coordinator", "router", "llama_cpp", "pools", "spares", "pinned"},
+    warn_unknown(root, {"cluster_token", "coordinator", "router", "llama_cpp", "console", "pools", "spares", "pinned"},
                  "cluster.yaml", c.warnings);
 
     c.cluster_token = get<std::string>(root, "cluster_token", "", "cluster.yaml");
@@ -115,6 +120,23 @@ ClusterConfig parse_config(const std::string& yaml_text, const std::optional<std
         warn_unknown(n, {"rpc_cache", "extra_head_args"}, "llama_cpp", c.warnings);
         c.llama_cpp.rpc_cache = get(n, "rpc_cache", c.llama_cpp.rpc_cache, "llama_cpp");
         c.llama_cpp.extra_head_args = get_strings(n, "extra_head_args", "llama_cpp");
+    }
+
+    if (auto n = root["console"]; n && n.IsMap()) {
+        warn_unknown(n, {"enabled", "allow_exec", "router_url", "model", "max_tokens", "generate_timeout_s",
+                         "exec_timeout_s"},
+                     "console", c.warnings);
+        auto& k = c.console;
+        k.enabled = get(n, "enabled", k.enabled, "console");
+        k.allow_exec = get(n, "allow_exec", k.allow_exec, "console");
+        k.router_url = get(n, "router_url", k.router_url, "console");
+        k.model = get(n, "model", k.model, "console");
+        k.max_tokens = get(n, "max_tokens", k.max_tokens, "console");
+        k.generate_timeout_s = get(n, "generate_timeout_s", k.generate_timeout_s, "console");
+        k.exec_timeout_s = get(n, "exec_timeout_s", k.exec_timeout_s, "console");
+        if (k.max_tokens < 1) throw ConfigError("console.max_tokens must be >= 1");
+        if (k.generate_timeout_s <= 0 || k.exec_timeout_s <= 0)
+            throw ConfigError("console.generate_timeout_s and console.exec_timeout_s must be > 0");
     }
 
     c.spares = get(root, "spares", 0, "cluster.yaml");
@@ -181,6 +203,8 @@ ClusterConfig parse_config(const std::string& yaml_text, const std::optional<std
         }
     }
 
+    if (!c.console.model.empty() && !names.contains(c.console.model))
+        c.warnings.push_back(std::format("console.model '{}' is not a pool; code generation will fail", c.console.model));
     if (c.router.slots_per_group < 1) throw ConfigError("router.slots_per_group must be >= 1");
     if (c.router.max_queue < 0) throw ConfigError("router.max_queue must be >= 0");
     if (c.coordinator.heartbeat_interval_s <= 0) throw ConfigError("coordinator.heartbeat_interval_s must be > 0");

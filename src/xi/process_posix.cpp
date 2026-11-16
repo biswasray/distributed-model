@@ -52,7 +52,7 @@ ManagedProcess::~ManagedProcess() {
     stop_locked(5.0);
 }
 
-ProcInfo ManagedProcess::start(const std::vector<std::string>& argv_in) {
+ProcInfo ManagedProcess::start(const std::vector<std::string>& argv_in, const std::filesystem::path& cwd) {
     std::lock_guard lk(mu_);
     stop_locked(15.0);
     if (argv_in.empty()) throw std::runtime_error("empty command line");
@@ -73,6 +73,7 @@ ProcInfo ManagedProcess::start(const std::vector<std::string>& argv_in) {
     std::vector<char*> cargv;
     for (auto& a : args) cargv.push_back(a.data());
     cargv.push_back(nullptr);
+    const std::string dir = cwd.empty() ? std::string() : cwd.string();
     const pid_t parent = ::getpid();
     long max_fd = ::sysconf(_SC_OPEN_MAX);
     if (max_fd < 0 || max_fd > 65536) max_fd = 65536;
@@ -99,8 +100,15 @@ ProcInfo ManagedProcess::start(const std::vector<std::string>& argv_in) {
         // Close every other inherited descriptor (e.g. XI's listening socket).
         for (int fd = 3; fd < max_fd; ++fd)
             if (fd != err_pipe[1]) ::close(fd);
+        int e = 0;
+        if (!dir.empty() && ::chdir(dir.c_str()) != 0) {
+            e = errno;
+            ssize_t w = ::write(err_pipe[1], &e, sizeof(e));
+            (void)w;
+            ::_exit(127);
+        }
         ::execvp(cargv[0], cargv.data());
-        int e = errno;
+        e = errno;
         ssize_t w = ::write(err_pipe[1], &e, sizeof(e));
         (void)w;
         ::_exit(127);

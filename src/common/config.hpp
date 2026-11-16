@@ -54,11 +54,23 @@ struct LlamaCppConfig {
     std::vector<std::string> extra_head_args;
 };
 
+// Web console on the coordinator (architecture/03-coordinator.md §8, ADR-009).
+struct ConsoleConfig {
+    bool enabled = true;          // serve the dashboard at /ui/
+    bool allow_exec = false;      // allow POST /console/exec (agents must also run with --allow-exec)
+    std::string router_url = "http://127.0.0.1:8000";  // where code generation is sent
+    std::string model;            // pool used for code generation; empty = first pool
+    int max_tokens = 1024;
+    double generate_timeout_s = 600;
+    double exec_timeout_s = 60;   // default per-run timeout offered by the UI
+};
+
 struct ClusterConfig {
     std::string cluster_token;  // after applying QWEN_CLUSTER_TOKEN precedence
     CoordinatorConfig coordinator;
     RouterConfig router;
     LlamaCppConfig llama_cpp;
+    ConsoleConfig console;
     std::vector<PoolConfig> pools;
     int spares = 0;
     std::vector<PinnedEntry> pinned;
@@ -67,6 +79,8 @@ struct ClusterConfig {
     const PoolConfig* find_pool(const std::string& name) const;
     int slots_for(const PoolConfig& pool) const { return pool.parallel.value_or(router.slots_per_group); }
     int total_nodes_requested() const;
+    // The pool the console generates code with: console.model, else the first pool ("" if none).
+    std::string console_model() const;
 };
 
 // Parses YAML text. Throws ConfigError on any validation rule marked "Startup fails".

@@ -73,7 +73,7 @@ target_compile_definitions(xgi_common PUBLIC XGI_VERSION="${PROJECT_VERSION}")
 target_link_libraries(xgi_common PUBLIC xgi_build_flags
     httplib::httplib nlohmann_json::nlohmann_json yaml-cpp Threads::Threads)
 if(WIN32)
-    target_link_libraries(xgi_common PUBLIC ws2_32)
+    target_link_libraries(xgi_common PUBLIC ws2_32 advapi32)
 endif()
 
 # ---------------------------------------------------------------- XI (node agent)
@@ -86,6 +86,7 @@ add_library(xi_lib STATIC
     src/xi/agent.cpp
     src/xi/commands.cpp
     src/xi/process.cpp
+    src/xi/runtimes.cpp
     ${XI_PROCESS_SRC}
 )
 target_link_libraries(xi_lib PUBLIC xgi_common)
@@ -94,7 +95,22 @@ add_executable(xi src/xi/main.cpp)
 target_link_libraries(xi PRIVATE xi_lib)
 
 # ---------------------------------------------------------------- XGI (coordinator + router)
+# The console UI (plain HTML/CSS/JS) is embedded into the binary at build time.
+set(XGI_UI_FILES index.html app.css app.js)
+list(TRANSFORM XGI_UI_FILES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/src/xgi/ui/" OUTPUT_VARIABLE XGI_UI_DEPS)
+list(JOIN XGI_UI_FILES "," XGI_UI_LIST)
+set(XGI_UI_CPP "${CMAKE_CURRENT_BINARY_DIR}/generated/ui_assets.cpp")
+add_custom_command(
+    OUTPUT "${XGI_UI_CPP}"
+    COMMAND "${CMAKE_COMMAND}" "-DROOT=${CMAKE_CURRENT_SOURCE_DIR}/src/xgi/ui" "-DFILES=${XGI_UI_LIST}"
+            "-DOUT=${XGI_UI_CPP}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedAssets.cmake"
+    DEPENDS ${XGI_UI_DEPS} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedAssets.cmake"
+    COMMENT "Embedding console UI"
+    VERBATIM)
+
 add_library(xgi_lib STATIC
+    src/xgi/console.cpp
+    "${XGI_UI_CPP}"
     src/xgi/coordinator.cpp
     src/xgi/placement.cpp
     src/xgi/router.cpp

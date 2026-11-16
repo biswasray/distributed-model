@@ -355,6 +355,10 @@ router:
 llama_cpp:
   rpc_cache: true              # pass -c to rpc-server
   extra_head_args: []          # appended to every llama-server
+
+console:                       # web console at http://<control-ip>:8100/ui/
+  allow_exec: false            # true = the console may run code on nodes started with xi --allow-exec
+  model: qwen3-30b-a3b         # pool that writes code ("" = first pool)
 # The llama.cpp folder, ports and threads are per-node xi.exe flags (--llama-dir, --rpc-port, --head-port).
 
 pools:
@@ -392,6 +396,7 @@ pinned:
 | `groups` | Number of copies of that model |
 | `context` | Maximum context length per request. Larger values use more RAM on every node. |
 | `spares` | Nodes kept idle for automatic failover |
+| `console.allow_exec` | Let the web console run code on nodes. Off by default; each node must also run `xi --allow-exec` (§12.1). |
 
 ---
 
@@ -486,8 +491,10 @@ Plain-text completion, passed through to the head node.
 | POST | `/undeploy` | Stop all groups |
 | POST | `/groups/{id}/restart` | Restart one group |
 | POST | `/drain/{node_id}` · `/undrain/{node_id}` | Take a node out of service gracefully, or return it |
+| GET | `/ui/` | Web console (§12.1). No token needed to load the page. |
+| POST | `/console/generate` · `/console/exec` | Console: generate code with a pool, run code on a node |
 
-All coordinator endpoints except `/health` need the header `X-Cluster-Token`. Full schemas are in [architecture/05-protocols-and-data.md](architecture/05-protocols-and-data.md).
+All coordinator endpoints except `/health` and the console page need the header `X-Cluster-Token`. Full schemas are in [architecture/05-protocols-and-data.md](architecture/05-protocols-and-data.md).
 
 ### Python client example
 
@@ -540,11 +547,33 @@ Adding more machines to a group **doesn't** shrink the first term. The same 47 G
 
 ## 12. Monitoring and operations
 
-- **Dashboard:** `GET /groups` on the coordinator shows each group's health and load. You can connect it to Grafana or poll it with a script.
+- **Dashboard:** open `http://192.168.1.10:8100/ui/` in a browser (§12.1). For scripts, `GET /nodes` and `GET /groups` return the same data as JSON.
 - **Logs:** each agent writes to `C:\qwen-cluster\logs\xi.log`, and its llama.cpp output goes to `logs\head.log` or `logs\rpc.log`. The last 500 lines are also available from `GET /logs/{role}` on the agent. On the control machine, XGI writes `logs\xgi-coordinator.log` and `logs\xgi-router.log` (or `logs\xgi.log` for `xgi serve`).
 - **Failover:** when a node stops sending heartbeats, the coordinator marks its group *degraded*, drains in-flight requests, replaces the node with a spare, and restarts the group.
 - **Maintenance:** call `POST /drain/{host}` before rebooting or updating a machine.
 - **Upgrades:** update llama.cpp on **all nodes at the same time**. Mixed versions can break RPC.
+
+### 12.1 Web console
+
+Open `http://192.168.1.10:8100/ui/` on any machine on the LAN, and enter the cluster token when asked.
+
+- **Nodes:** health (`Serving`, `Idle`, `Loading`, `Draining`, `Dead`), role and group, free RAM, CPU, OS, and the languages each node can run. Click a node for its full system details, processes, llama.cpp binaries, models and language versions, or to drain it.
+- **Groups:** status, members and the last error.
+- **Code console:** pick a node and a language, then describe a task. The cluster's model (`console.model`) writes a program. Review and edit it, then click **Run on <node>** to see its output and exit code. **Write code myself** skips the model.
+
+Running code is **off by default**. To turn it on:
+
+1. Set `console.allow_exec: true` in `cluster.yaml` and restart XGI.
+2. On each node that may run code, re-register the agent with execution allowed, then restart it. This adds `--allow-exec --exec-dir C:\qwen-cluster\exec`:
+   ```powershell
+   .\scripts\install-xi-task.ps1 -Coordinator http://192.168.1.10:8100 -AllowExec
+   Stop-ScheduledTask -TaskName QwenNodeAgent; Start-ScheduledTask -TaskName QwenNodeAgent
+   ```
+   ```sh
+   sudo XI_ALLOW_EXEC=1 ./scripts/install-xi-service.sh http://192.168.1.10:8100   # Linux / macOS
+   ```
+
+> ⚠️ The program runs with the agent's rights. That is **SYSTEM** for the scheduled task. Anyone with the cluster token can then run anything on those PCs. Enable it only on nodes where that's acceptable. Programs on a serving node also take CPU and RAM from inference. See [06-security.md](architecture/06-security.md) T10.
 
 ---
 
@@ -556,6 +585,7 @@ Adding more machines to a group **doesn't** shrink the first term. The same 47 G
 - Allow those ports only on the **Private** firewall profile, and preferably only from cluster IPs (`-RemoteAddress 192.168.1.0/24`).
 - If the router must be reachable more widely, put it behind a reverse proxy with authentication (an API key) and HTTPS.
 - Prompts and responses travel unencrypted on the LAN. Don't send sensitive data unless the network is secured.
+- Keep the web console's code execution off (`console.allow_exec: false`) unless you need it. When it's on, the cluster token lets its holder run code on every node started with `--allow-exec` (§12.1).
 
 ---
 

@@ -32,9 +32,9 @@ public:
     ManagedProcess(const ManagedProcess&) = delete;
     ManagedProcess& operator=(const ManagedProcess&) = delete;
 
-    // Starts argv[0] (searched on PATH if it has no directory) with argv[1..].
+    // Starts argv[0] (searched on PATH if it has no directory) with argv[1..], in `cwd` if given.
     // A running process is stopped first (restart semantics). Throws std::runtime_error on failure.
-    ProcInfo start(const std::vector<std::string>& argv);
+    ProcInfo start(const std::vector<std::string>& argv, const std::filesystem::path& cwd = {});
     // Graceful stop: CTRL_BREAK / SIGTERM to the process group, wait up to grace_s, then kill.
     ProcInfo stop(double grace_s = 15.0);
     ProcInfo info();

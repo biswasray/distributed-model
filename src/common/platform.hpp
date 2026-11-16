@@ -30,6 +30,17 @@ inline constexpr std::string_view kExeSuffix = "";
 inline constexpr std::string_view kPlatformName = "linux";
 #endif
 
+// CPU architecture this binary was built for.
+#if defined(_M_X64) || defined(__x86_64__)
+inline constexpr std::string_view kArchName = "x86_64";
+#elif defined(_M_ARM64) || defined(__aarch64__) || defined(__arm64__)
+inline constexpr std::string_view kArchName = "arm64";
+#elif defined(_M_IX86) || defined(__i386__)
+inline constexpr std::string_view kArchName = "x86";
+#else
+inline constexpr std::string_view kArchName = "unknown";
+#endif
+
 // UTF-8 <-> std::filesystem::path, the same way on every OS.
 inline std::filesystem::path path_from_utf8(std::string_view s) {
     return std::filesystem::path(std::u8string(s.begin(), s.end()));

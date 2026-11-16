@@ -22,6 +22,11 @@ Agent::Agent(AgentOptions opts) : opts_(std::move(opts)) {
     rpc_ = std::make_unique<ManagedProcess>("rpc", opts_.log_dir / "rpc.log");
     head_ = std::make_unique<ManagedProcess>("head", opts_.log_dir / "head.log");
     if (opts_.advertise_ip.empty()) opts_.advertise_ip = coordinator_host_ip();
+    runtimes_ = detect_runtimes(opts_.log_dir / "exec.log");
+    std::vector<std::string> names;
+    for (const auto& r : runtimes_) names.push_back(r.id);
+    xgi::log::info("runtimes: {}; console exec {}", names.empty() ? "none" : xgi::join(names, ", "),
+                   opts_.allow_exec ? "ENABLED (--allow-exec)" : "off");
     setup_routes();
 }
 
@@ -38,6 +43,10 @@ int Agent::default_threads() const { return xgi::sysinfo::cpu_physical(); }
 json Agent::processes() { return json{{"rpc", rpc_->info().to_json()}, {"head", head_->info().to_json()}}; }
 
 json Agent::facts() {
+    json runtimes = json::array();
+    for (const auto& r : runtimes_) runtimes.push_back(r.to_json());
+    std::error_code ec;
+    auto space = std::filesystem::space(opts_.models_dir, ec);
     return json{
         {"node_id", opts_.name},
         {"hostname", xgi::sysinfo::hostname()},
@@ -50,8 +59,15 @@ json Agent::facts() {
         {"cpu_physical", xgi::sysinfo::cpu_physical()},
         {"cpu_logical", xgi::sysinfo::cpu_logical()},
         {"os", xgi::sysinfo::os_string()},
+        {"arch", std::string(xgi::kArchName)},
+        {"cpu_model", xgi::sysinfo::cpu_model()},
+        {"disk_free", ec ? json(nullptr) : json(space.available)},
         {"models", scan_models(opts_.models_dir)},
         {"processes", processes()},
+        {"binaries", {{"rpc_server", std::filesystem::exists(opts_.rpc_server_bin, ec)},
+                      {"llama_server", std::filesystem::exists(opts_.llama_server_bin, ec)}}},
+        {"runtimes", runtimes},
+        {"exec_enabled", opts_.allow_exec},
         {"agent_version", xgi::kVersion},
     };
 }
@@ -135,6 +151,43 @@ void Agent::setup_routes() {
         lines = std::clamp(lines, 0, static_cast<int>(ManagedProcess::kTailLines));
         auto& p = role == "rpc" ? rpc_ : head_;
         xgi::reply_json(res, 200, json{{"role", role}, {"lines", p->tail(static_cast<size_t>(lines))}});
+    });
+
+    // Console code execution (ADR-009). Only with --allow-exec, only with a detected runtime.
+    s.Post("/exec", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!opts_.allow_exec)
+            return xgi::reply_error(res, 403, "code execution is disabled on this node (start xi with --allow-exec)",
+                                    "forbidden");
+        auto body = xgi::parse_body(req, res);
+        if (!body) return;
+        ExecRequest r;
+        try {
+            r = ExecRequest::from_json(*body, opts_.exec_max_timeout_s);
+        } catch (const std::exception& e) {
+            return xgi::reply_error(res, 400, e.what(), "invalid_request");
+        }
+        auto rt = std::find_if(runtimes_.begin(), runtimes_.end(), [&](const Runtime& x) { return x.id == r.language; });
+        if (rt == runtimes_.end())
+            return xgi::reply_error(res, 400, "language '" + r.language + "' is not available on this node",
+                                    "invalid_request");
+        if (exec_jobs_.fetch_add(1) >= opts_.exec_max_jobs) {
+            exec_jobs_.fetch_sub(1);
+            res.set_header("Retry-After", "5");
+            return xgi::reply_error(res, 429, "too many console jobs running on this node", "capacity");
+        }
+        xgi::log::info("exec: {} job from {} ({} bytes, timeout {} s)", r.language, req.remote_addr, r.code.size(),
+                       r.timeout_s);
+        try {
+            json out = run_job(*rt, r, opts_.exec_dir, opts_.log_dir / "exec.log");
+            exec_jobs_.fetch_sub(1);
+            xgi::log::info("exec: {} job finished: exit {} in {:.2f} s{}", r.language, out["exit_code"].dump(),
+                           out["duration_s"].get<double>(), out["timed_out"].get<bool>() ? " (timed out)" : "");
+            xgi::reply_json(res, 200, out);
+        } catch (const std::exception& e) {
+            exec_jobs_.fetch_sub(1);
+            xgi::log::error("exec failed: {}", e.what());
+            xgi::reply_error(res, 500, e.what(), "process");
+        }
     });
 
     s.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {

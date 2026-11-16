@@ -335,7 +335,9 @@ Clients use `http://192.168.1.10:8000/v1`. If `router.api_keys` is set, they als
 
 ## 5. Day-to-day operations
 
-All coordinator calls except `/health` need `X-Cluster-Token`. The table uses curl, with `$T` and `$C` set as in §4.3. On Windows, use `curl.exe` or the `Invoke-RestMethod` forms above.
+**Web console:** open `http://192.168.1.10:8100/ui/` in a browser and enter the cluster token. It shows node health, system details and languages, groups, and a chat box that writes code with the cluster's model and (if enabled) runs it on a node. See the [operator guide §12.1](distributed-qwen-cluster.md#121-web-console).
+
+All coordinator calls except `/health` and the console page need `X-Cluster-Token`. The table uses curl, with `$T` and `$C` set as in §4.3. On Windows, use `curl.exe` or the `Invoke-RestMethod` forms above.
 
 | Task | Command |
 |---|---|

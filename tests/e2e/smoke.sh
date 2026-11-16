@@ -46,6 +46,12 @@ stream_ok() { chat '{"model":"pair","stream":true,"messages":[]}' | grep -q '\[D
 repaired() { healthy && ! pair_field "\"workers\":\[\"$WORKER\"\]"; }
 exit_seen() { pair_field 'exited'; }
 undeployed() { post "$COORD/undeploy" | grep -q '"stopped":1'; }
+post_json() { curl -s -X POST -H "X-Cluster-Token: $TOKEN" -H "Content-Type: application/json" -d "$2" "$1"; }
+ui_ok() { curl -s "$COORD/ui/" | grep -q '<title>XGI Console</title>'; }
+runtimes_ok() { get "$AGENT_A/status" | tr -d ' \n' | grep -q '"language":"sh"'; }
+generate_ok() { post_json "$COORD/console/generate" '{"node_id":"node-a","language":"sh","prompt":"x"}' | grep -q 'Hello from mock'; }
+exec_ok() { post_json "$COORD/console/exec" '{"node_id":"node-a","language":"sh","code":"echo console-ok; pwd"}' | grep -q 'console-ok'; }
+exec_forbidden() { post_json "$COORD/console/exec" '{"node_id":"node-b","language":"sh","code":"echo x"}' | grep -q '"code":403'; }
 head_stopped() { get "$AGENT_A/status" | tr -d ' \n' | grep -q '"head":{"exit_code":null,"pid":null,"state":"stopped"'; }
 
 cleanup() {
@@ -65,6 +71,7 @@ cat > "$WORK/cluster.yaml" <<EOF
 cluster_token: "$TOKEN"
 coordinator: {host: 127.0.0.1, port: 19100, heartbeat_interval_s: 1, node_timeout_s: 5, group_start_timeout_s: 60}
 router: {host: 127.0.0.1, port: 19000, coordinator_url: "$COORD", request_timeout_s: 60}
+console: {allow_exec: true, router_url: "$ROUTER", model: pair, generate_timeout_s: 30}
 pools:
   - {name: pair, model_file: mock.gguf, nodes_per_group: 2, groups: 1, extra_args: ["--mock-load-s", "1"]}
 spares: 1
@@ -75,7 +82,10 @@ PIDS="$PIDS $!"
 i=0
 for n in a b c; do
     i=$((i + 1))
-    "$XI" --coordinator "$COORD" --token "$TOKEN" --name "node-$n" --host 127.0.0.1 --advertise-ip 127.0.0.1 \
+    EXEC_FLAGS=""
+    [ "$n" = a ] && EXEC_FLAGS="--allow-exec --exec-dir $WORK/exec-a"
+    # shellcheck disable=SC2086
+    "$XI" $EXEC_FLAGS --coordinator "$COORD" --token "$TOKEN" --name "node-$n" --host 127.0.0.1 --advertise-ip 127.0.0.1 \
         --port $((19200 + i)) --rpc-port $((50260 + i)) --head-port $((19080 + i)) --heartbeat-s 1 \
         --models-dir "$WORK/models-$n" --log-dir "$WORK/logs-$n" \
         --rpc-server-bin "$MOCK_RPC" --llama-server-bin "$MOCK_LLAMA" > "$WORK/xi-$n.out" 2>&1 &
@@ -91,6 +101,11 @@ check 'head is the node holding the model' head_is_a
 check 'router lists the pool' wait_for 10 models_listed
 check 'non-streaming completion' completion_ok
 check 'streaming completion (SSE)' stream_ok
+check 'console page served at /ui/' ui_ok
+check 'node-a reports the sh runtime' runtimes_ok
+check 'console generates code through the router' generate_ok
+check 'console runs code on node-a (--allow-exec)' exec_ok
+check 'console exec refused on node-b' exec_forbidden
 
 # Worker failure: kill the worker's agent (on Linux its rpc-server dies with it).
 WORKER=$(group pair-0 | sed 's/.*"workers":\["\([^"]*\)".*/\1/')

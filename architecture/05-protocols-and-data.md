@@ -7,7 +7,7 @@
 | Port | Protocol | Listener | Callers | Auth |
 |---|---|---|---|---|
 | 8000 | HTTP | Router | Clients | Optional `Authorization: Bearer` |
-| 8100 | HTTP | Coordinator | Agents, router, operators | `X-Cluster-Token` (except `/health`) |
+| 8100 | HTTP | Coordinator (and the web console at `/ui/`) | Agents, router, operators, browsers | `X-Cluster-Token` (except `/health`, `/` and `/ui/*`) |
 | 8200 | HTTP | Node Agent | Coordinator | `X-Cluster-Token` |
 | 8080 | HTTP | `llama-server` (head) | Router, coordinator (health) | **None**. Restrict with the firewall. |
 | 50052 | TCP (llama.cpp RPC) | `rpc-server` (worker) | That group's head | **None**. Restrict with the firewall. |
@@ -33,13 +33,24 @@ Errors from every component (router, coordinator, agent) use the same body: `{"e
   "cpu_physical": 6,
   "cpu_logical": 12,
   "os": "Windows-11-10.0.26200-SP0",
+  "arch": "x86_64",
+  "cpu_model": "Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz",
+  "disk_free": 214748364800,
   "models": ["Qwen3-30B-A3B-Q4_K_M.gguf"],
   "processes": { "rpc": {"state": "stopped"}, "head": {"state": "stopped"} },
-  "agent_version": "0.1.0"
+  "binaries": { "rpc_server": true, "llama_server": true },
+  "runtimes": [
+    {"language": "python", "label": "Python", "version": "Python 3.12.10", "path": "C:\\Python312\\python.exe"},
+    {"language": "powershell", "label": "Windows PowerShell", "version": "5.1.26100.1", "path": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"}
+  ],
+  "exec_enabled": false,
+  "agent_version": "0.2.0"
 }
 ```
 
-`agent_version` is optional (informational). The coordinator ignores fields it doesn't know.
+`agent_version`, `arch`, `cpu_model`, `disk_free` (bytes free on the models dir's drive, or `null`), `binaries`, `runtimes` and `exec_enabled` are optional and informational: the console shows them ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)). The coordinator stores the whole body and returns it from `GET /nodes`, and ignores fields it doesn't know.
+
+`runtimes[].language` is one of `python`, `javascript`, `powershell` (Windows only), `pwsh`, `bash`, `sh` (POSIX only), `cmd` (Windows only), `ruby`, `perl`, `php`, `lua`, `go`, `java`, `c`, `cpp`, `rust`. Only runtimes found on the agent's `PATH` whose version probe succeeds are listed.
 
 Response `200`: `{"ok": true, "heartbeat_interval_s": 5}`
 
@@ -92,6 +103,49 @@ A list of node records ([03-coordinator.md §2.1](03-coordinator.md#21-node-reco
 | `POST /groups/{id}/restart` | `202 {"group_id": ..., "status": "starting"}` · `404` |
 | `POST /drain/{node_id}` · `/undrain/{node_id}` | `200 {node record}` · `404` |
 
+### Web console ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md))
+
+Served on the coordinator port when `console.enabled` is true. `GET /` redirects to `/ui/`. `GET /ui/` and `GET /ui/{index.html, app.css, app.js}` are static files and need **no token**. The `/console/*` calls need `X-Cluster-Token`.
+
+#### `GET /console/info`
+
+```json
+{"version": "0.2.0", "allow_exec": false, "model": "qwen3-30b-a3b", "pools": ["qwen3-30b-a3b"],
+ "router_url": "http://127.0.0.1:8000", "exec_timeout_s": 60, "node_timeout_s": 30}
+```
+
+#### `POST /console/generate`
+
+Asks pool `console.model` (through the router's `/v1/chat/completions`, non-streaming, `temperature` 0.2, `max_tokens` = `console.max_tokens`) for one program.
+
+```json
+{
+  "node_id": "LAB-PC-07",
+  "language": "python",
+  "prompt": "List the 5 largest files in the current folder",
+  "history": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "```python\n...\n```"}]
+}
+```
+
+`node_id` and `history` are optional. The node's `os`, `arch` and runtime version go into the system prompt. Only the last 12 `user`/`assistant` turns are used. Limits: `prompt` ≤ 16 KB, `history` ≤ 64 KB.
+
+Response `200`:
+
+```json
+{"language": "python", "code": "import os\n...", "reply": "```python\n...```", "model": "qwen3-30b-a3b",
+ "group": "qwen3-30b-a3b-2", "finish_reason": "stop", "duration_s": 41.7}
+```
+
+`code` is the first fenced block of `reply`, with any `<think>…</think>` removed. Errors: `400` bad input · `404` unknown node · `502` router unreachable or bad reply · router `429`/`503` passed through.
+
+#### `POST /console/exec`
+
+```json
+{"node_id": "LAB-PC-07", "language": "python", "code": "print('hi')", "timeout_s": 60}
+```
+
+`timeout_s` defaults to `console.exec_timeout_s`. The coordinator forwards the call to the node's `POST /exec` (§3) and adds `node_id` to the agent's response. Errors: `403` if `console.allow_exec` is false or the node has `exec_enabled: false` · `404` unknown node · `409` dead node · `502` agent unreachable · agent `400`/`429` passed through.
+
 ## 3. Agent API
 
 ### `POST /rpc/start`
@@ -138,6 +192,25 @@ The full node facts, with the same shape as the `/register` body.
 ```json
 {"role": "head", "lines": ["...", "..."]}
 ```
+
+### `POST /exec`
+
+Runs a program with one of the node's detected `runtimes` ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)). Only available when the agent runs with `--allow-exec`.
+
+```json
+{"language": "python", "code": "print('hi')", "timeout_s": 60}
+```
+
+`code` is 1 byte to 256 KB. `timeout_s` (default 60) is capped at `--exec-max-timeout-s` and covers the compile step too (C, C++, Rust). The program runs with `--exec-dir` as its working directory and empty stdin.
+
+Response `200`, also when the program fails or times out:
+
+```json
+{"language": "python", "runtime": "Python 3.12.10", "stage": "run", "exit_code": 0, "timed_out": false,
+ "duration_s": 0.42, "output": ["hi"], "output_truncated": false}
+```
+
+`output` is the merged stdout and stderr, as the last 500 lines, each cut at 4000 characters. `stage` is `compile` if a compile step failed. `exit_code` is `null` when the program was killed for timing out. Errors: `403` exec disabled · `400` bad input, or the language isn't available on this node · `429` 2 jobs already running (`Retry-After: 5`).
 
 ## 4. Router API
 
@@ -194,6 +267,15 @@ llama_cpp:
   rpc_cache: true            # pass -c to rpc-server
   extra_head_args: []        # appended to every llama-server
 
+console:                     # web console at http://<coordinator>:8100/ui/ (ADR-009)
+  enabled: true
+  allow_exec: false          # allow POST /console/exec; nodes also need xi --allow-exec
+  router_url: http://127.0.0.1:8000   # code generation goes through the router
+  model: ""                  # pool that writes code; "" = the first pool
+  max_tokens: 1024
+  generate_timeout_s: 600
+  exec_timeout_s: 60         # default run timeout offered by the UI
+
 pools:                       # filled in this order
   - name: qwen3-30b-a3b      # = the client "model" field
     model_file: Qwen3-30B-A3B-Q4_K_M.gguf   # RELATIVE to each head's models dir
@@ -221,7 +303,11 @@ pinned:                      # optional: prefer these nodes as heads for a pool
 | `nodes_per_group ≥ 1`, `groups ≥ 0` | Startup fails |
 | `model_file` is a relative path ending in `.gguf` (the first part, for split files) | Startup fails |
 | Σ(`nodes_per_group × groups`) + `spares` > live nodes | **Warning**. The extra groups stay `unplaced`. |
+| `console.max_tokens ≥ 1`, `console.*_timeout_s > 0` | Startup fails |
+| `console.model` is not a pool name | **Warning**. Code generation fails. |
 
 ### Precedence
 
 Environment `QWEN_CLUSTER_TOKEN` › `cluster.yaml` › built-in defaults.
+
+The console calls the router with the first entry of `router.api_keys` (if any), so the coordinator and router must read the same `cluster.yaml`.

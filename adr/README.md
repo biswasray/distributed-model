@@ -12,6 +12,7 @@ Each ADR records one significant decision: its context, what was decided, and th
 | [ADR-006](ADR-006-in-memory-coordinator-state.md) | Coordinator state kept in memory only | Accepted |
 | [ADR-007](ADR-007-cpp-implementation-xgi-xi.md) | Implement the control plane in C++ as XGI and XI | Accepted (amended by ADR-008) |
 | [ADR-008](ADR-008-cross-platform-build.md) | Cross-platform XGI/XI (Windows, Linux, macOS) with any C++20 compiler | Accepted |
+| [ADR-009](ADR-009-web-console-and-node-code-execution.md) | Web console on XGI and opt-in code execution on nodes | Proposed |
 
 ## Template
 

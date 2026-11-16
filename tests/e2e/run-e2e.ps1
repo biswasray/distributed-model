@@ -3,8 +3,8 @@
   End-to-end test: xgi serve + 4 xi agents on localhost, driving mock llama.cpp binaries.
 
   Covers: registration, auth (cluster token + API keys), deploy/409, group start sequence,
-  routing (stream + non-stream), unknown model, worker failure -> repair onto the spare,
-  drain -> unplaced -> undrain -> healthy, restart, undeploy.
+  routing (stream + non-stream), unknown model, web console (UI, generate, exec),
+  worker failure -> repair onto the spare, drain -> unplaced -> undrain -> healthy, restart, undeploy.
 #>
 param(
     [Parameter(Mandatory)][string]$Xgi,
@@ -96,6 +96,11 @@ router:
   queue_timeout_s: 10
   request_timeout_s: 60
   api_keys: ["$apiKey"]
+console:
+  allow_exec: true
+  router_url: $router
+  model: solo
+  generate_timeout_s: 30
 pools:
   - name: pair
     model_file: mock.gguf
@@ -120,11 +125,12 @@ spares: 1
     $i = 0
     foreach ($n in 'a', 'b', 'c', 'd') {
         $i++
-        $agents["node-$n"] = Start-Bg "xi-$n" $Xi @(
+        $execFlags = if ($n -eq 'a') { @('--allow-exec', '--exec-dir', "`"$WorkDir\exec-a`"") } else { @() }
+        $agents["node-$n"] = Start-Bg "xi-$n" $Xi ($execFlags + @(
             '--coordinator', $coord, '--name', "node-$n", '--host', '127.0.0.1', '--advertise-ip', '127.0.0.1',
             '--port', (18200 + $i), '--rpc-port', (50160 + $i), '--head-port', (18080 + $i), '--heartbeat-s', '1',
             '--models-dir', "`"$WorkDir\models-$n`"", '--log-dir', "`"$WorkDir\logs-$n`"",
-            '--rpc-server-bin', "`"$MockRpc`"", '--llama-server-bin', "`"$MockLlama`"")
+            '--rpc-server-bin', "`"$MockRpc`"", '--llama-server-bin', "`"$MockLlama`""))
     }
     Check (WaitFor { @(Nodes | Where-Object { $_.status -eq 'alive' }).Count -eq 4 } 20 '4 nodes') '4 agents registered'
     Check ((Call GET "$coord/nodes").Status -eq 401) 'coordinator rejects calls without X-Cluster-Token'
@@ -161,6 +167,29 @@ spares: 1
     Check ($r.Status -eq 200 -and $r.Json.choices[0].text -like 'Hello*') '/v1/completions passthrough'
     $h = (Call GET "$router/health").Json
     Check ($h.pools.pair.healthy_groups -eq 1 -and $h.pools.solo.slots -eq 2) 'router /health shows per-pool counts'
+
+    # --- web console (ADR-009)
+    $ui = Call GET "$coord/ui/"
+    Check ($ui.Status -eq 200 -and $ui.Text -match '<title>XGI Console</title>') 'GET /ui/ serves the console page without a token'
+    Check ((Call GET "$coord/ui/app.js").Status -eq 200 -and (Call GET "$coord/ui/nope.js").Status -eq 404) 'console static files: app.js 200, unknown 404'
+    Check ((Call GET "$coord/console/info").Status -eq 401) 'console API requires X-Cluster-Token'
+    $info = (Call GET "$coord/console/info" $null $T).Json
+    Check ($info.allow_exec -eq $true -and $info.model -eq 'solo') 'GET /console/info'
+    $na = Nodes | Where-Object { $_.node_id -eq 'node-a' }
+    $nb = Nodes | Where-Object { $_.node_id -eq 'node-b' }
+    Check ($na.exec_enabled -eq $true -and $nb.exec_enabled -eq $false -and $na.arch -and $null -ne $na.runtimes) 'node facts report exec_enabled, arch and runtimes'
+    $onWindows = $env:OS -eq 'Windows_NT'
+    $lang = if ($onWindows) { 'cmd' } else { 'sh' }
+    $code = if ($onWindows) { "@echo off`necho console-ok %CD%`nexit /b 0" } else { "echo console-ok `$PWD`nexit 0" }
+    Check (@($na.runtimes | Where-Object { $_.language -eq $lang }).Count -eq 1) "node-a detected the $lang runtime"
+    $g = Call POST "$coord/console/generate" @{ node_id = 'node-a'; language = $lang; prompt = 'print ok' } $T
+    Check ($g.Status -eq 200 -and $g.Json.code -like 'Hello from mock*' -and $g.Json.group -eq 'solo-0') 'POST /console/generate goes through the router to the solo pool'
+    Check ((Call POST "$coord/console/generate" @{ language = $lang; prompt = '' } $T).Status -eq 400) 'generate with an empty prompt -> 400'
+    $x = Call POST "$coord/console/exec" @{ node_id = 'node-a'; language = $lang; code = $code; timeout_s = 20 } $T
+    Check ($x.Status -eq 200 -and $x.Json.exit_code -eq 0 -and ($x.Json.output -join ' ') -match 'console-ok .*exec-a') 'POST /console/exec runs code on node-a in its --exec-dir'
+    Check ((Call POST "$coord/console/exec" @{ node_id = 'node-b'; language = $lang; code = $code } $T).Status -eq 403) 'exec on a node without --allow-exec -> 403'
+    Check ((Call POST "$coord/console/exec" @{ node_id = 'node-a'; language = 'cobol'; code = 'x' } $T).Status -eq 400) 'exec with an unavailable language -> 400'
+    Check ((Call POST 'http://127.0.0.1:18202/exec' @{ language = $lang; code = $code } $T).Status -eq 403) 'agent /exec is off without --allow-exec'
 
     # --- failover: kill the worker's agent (its rpc-server dies with it)
     $victim = $pair.workers[0]

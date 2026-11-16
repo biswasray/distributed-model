@@ -36,7 +36,7 @@ ManagedProcess::~ManagedProcess() {
     stop_locked(5.0);
 }
 
-ProcInfo ManagedProcess::start(const std::vector<std::string>& argv) {
+ProcInfo ManagedProcess::start(const std::vector<std::string>& argv, const std::filesystem::path& cwd) {
     std::lock_guard lk(mu_);
     stop_locked(15.0);
 
@@ -69,8 +69,10 @@ ProcInfo ManagedProcess::start(const std::vector<std::string>& argv) {
 
     std::string cmd_utf8 = build_command_line(argv);
     std::wstring cmd = widen(cmd_utf8);
+    std::wstring dir = cwd.empty() ? std::wstring() : cwd.wstring();
     PROCESS_INFORMATION pi{};
-    BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, flags, nullptr, nullptr, &si.StartupInfo, &pi);
+    BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, flags, nullptr,
+                             dir.empty() ? nullptr : dir.c_str(), &si.StartupInfo, &pi);
     DWORD err = GetLastError();
     DeleteProcThreadAttributeList(attrs);
     CloseHandle(write_end);

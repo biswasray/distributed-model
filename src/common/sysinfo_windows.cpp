@@ -72,4 +72,15 @@ std::string os_string() {
     return std::format("Windows-{}-{}.{}.{}-SP0", release, v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber);
 }
 
+std::string cpu_model() {
+    wchar_t buf[256]{};
+    DWORD size = sizeof(buf);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                     L"ProcessorNameString", RRF_RT_REG_SZ, nullptr, buf, &size) != ERROR_SUCCESS)
+        return {};
+    std::string s = to_utf8(buf, static_cast<int>(wcslen(buf)));
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    return s;
+}
+
 }  // namespace xgi::sysinfo

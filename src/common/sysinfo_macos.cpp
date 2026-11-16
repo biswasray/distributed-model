@@ -68,4 +68,6 @@ std::string os_string() {
     return std::format("macOS-{}-{}", ver.empty() ? u.release : ver, u.machine);
 }
 
+std::string cpu_model() { return sysctl_string("machdep.cpu.brand_string"); }
+
 }  // namespace xgi::sysinfo

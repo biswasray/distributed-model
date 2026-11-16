@@ -12,6 +12,7 @@
 
 #include "common/util.hpp"
 #include "xi/process.hpp"
+#include "xi/runtimes.hpp"
 
 namespace xi {
 
@@ -30,6 +31,11 @@ struct AgentOptions {
     std::filesystem::path rpc_server_bin;    // default <llama_dir>/rpc-server[.exe]
     std::filesystem::path llama_server_bin;  // default <llama_dir>/llama-server[.exe]
     double heartbeat_s = 5;
+    // Console code execution (ADR-009): off unless --allow-exec.
+    bool allow_exec = false;
+    std::filesystem::path exec_dir = "exec";  // working directory for console programs
+    double exec_max_timeout_s = 300;
+    int exec_max_jobs = 2;  // concurrent /exec jobs
 };
 
 class Agent {
@@ -63,6 +69,8 @@ private:
     xgi::StopSource stop_flag_;
     std::thread control_thread_;
     std::atomic<bool> stopped_{false};
+    std::vector<Runtime> runtimes_;  // detected once at startup
+    std::atomic<int> exec_jobs_{0};
 };
 
 }  // namespace xi

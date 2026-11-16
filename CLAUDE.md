@@ -8,7 +8,7 @@ Guidance for Claude (and any AI assistant) working in this repository.
 
 **Current phase: implementation.** The architecture is specified in Markdown, and the control plane is implemented in portable C++20 with CMake ([ADR-007](adr/ADR-007-cpp-implementation-xgi-xi.md), [ADR-008](adr/ADR-008-cross-platform-build.md)). It builds with MSVC, GCC, Clang or MinGW-w64 on Windows, Linux and macOS:
 
-- **XGI** (`xgi`, Extended General Intelligence): the coordinator and router (`xgi coordinator | router | serve | check-config`)
+- **XGI** (`xgi`, Extended General Intelligence): the coordinator and router (`xgi coordinator | router | serve | check-config`), plus the web console at `/ui/` ([ADR-009](adr/ADR-009-web-console-and-node-code-execution.md))
 - **XI** (`xi`, Extended Interface): the node agent
 
 Inference is still llama.cpp. XGI orchestrates it and is not an inference engine.
@@ -34,8 +34,9 @@ docs/
 ├── CMakeLists.txt · CMakePresets.json · cmake/Dependencies.cmake   ← build; deps pinned by SHA-256
 ├── cmake/toolchains/                  ← cross-compile toolchain files (MinGW-w64)
 ├── src/common/                        ← config, HTTP, logging, sockets, shutdown, sysinfo_<os>.cpp
-├── src/xi/                            ← XI: agent API, command lines, process_windows/posix.cpp
-├── src/xgi/                           ← XGI: coordinator, placement, router, scheduling
+├── src/xi/                            ← XI: agent API, command lines, runtimes/exec, process_windows/posix.cpp
+├── src/xgi/                           ← XGI: coordinator, placement, router, scheduling, console
+├── src/xgi/ui/                        ← console HTML/CSS/vanilla JS, embedded by cmake/EmbedAssets.cmake
 ├── tests/                             ← unit tests, mock llama.cpp binaries, e2e/run-e2e.ps1, e2e/smoke.sh
 ├── examples/cluster.yaml              ← example config (option D)
 └── scripts/                           ← install-xi-task.ps1 (Windows), install-xi-service.sh (systemd/launchd)
@@ -62,6 +63,7 @@ If you change a contract (an endpoint, field, port, or config key), update `05-p
 - **All control-plane calls carry `X-Cluster-Token`** ([ADR-004](adr/ADR-004-shared-cluster-token.md)). llama.cpp ports (8080, 50052) have no auth and are protected by the firewall.
 - **The coordinator keeps state in memory**, and agents re-register after a 404 ([ADR-006](adr/ADR-006-in-memory-coordinator-state.md)).
 - **The same llama.cpp build runs on every node.**
+- **Console code execution is opt-in twice**: `console.allow_exec` in `cluster.yaml` *and* `xi --allow-exec`. Generated code is never run without the operator clicking Run ([ADR-009](adr/ADR-009-web-console-and-node-code-execution.md)). The console UI stays dependency-free vanilla JS, embedded in `xgi`.
 
 ## Key numbers (keep consistent across docs)
 

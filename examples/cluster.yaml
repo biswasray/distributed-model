@@ -25,6 +25,15 @@ llama_cpp:
   rpc_cache: true            # pass -c to rpc-server
   extra_head_args: []        # appended to every llama-server
 
+console:                     # web console at http://<coordinator>:8100/ui/ (ADR-009)
+  enabled: true
+  allow_exec: false          # let the console run code; nodes must also run xi --allow-exec
+  router_url: http://127.0.0.1:8000
+  model: qwen3-30b-a3b       # pool that writes code ("" = first pool)
+  max_tokens: 1024
+  generate_timeout_s: 600
+  exec_timeout_s: 60
+
 pools:                       # filled in this order
   - name: qwen3-30b-a3b      # = the client "model" field
     model_file: Qwen3-30B-A3B-Q4_K_M.gguf   # RELATIVE to each head's models dir

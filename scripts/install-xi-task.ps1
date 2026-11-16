@@ -5,11 +5,16 @@
 
 .EXAMPLE
   .\install-xi-task.ps1 -Coordinator http://192.168.1.10:8100
+
+.EXAMPLE
+  # Also let the XGI web console run code on this node (ADR-009). Programs run as SYSTEM.
+  .\install-xi-task.ps1 -Coordinator http://192.168.1.10:8100 -AllowExec
 #>
 param(
     [Parameter(Mandatory)][string]$Coordinator,
     [string]$Root = 'C:\qwen-cluster',
-    [string]$TaskName = 'QwenNodeAgent'
+    [string]$TaskName = 'QwenNodeAgent',
+    [switch]$AllowExec
 )
 $ErrorActionPreference = 'Stop'
 
@@ -20,6 +25,10 @@ if (-not [Environment]::GetEnvironmentVariable('QWEN_CLUSTER_TOKEN', 'Machine'))
 }
 
 $argLine = "--coordinator $Coordinator --llama-dir `"$Root\llama.cpp`" --models-dir `"$Root\models`" --log-dir `"$Root\logs`""
+if ($AllowExec) {
+    Write-Warning 'Console code execution is ON: anyone with the cluster token can run programs on this PC as SYSTEM.'
+    $argLine += " --allow-exec --exec-dir `"$Root\exec`""
+}
 $action = New-ScheduledTaskAction -Execute $xi -Argument $argLine -WorkingDirectory $Root
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `

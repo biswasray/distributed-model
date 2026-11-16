@@ -14,6 +14,7 @@
 #include "common/platform.hpp"
 #include "common/shutdown.hpp"
 #include "common/util.hpp"
+#include "xgi/console.hpp"
 #include "xgi/coordinator.hpp"
 #include "xgi/router.hpp"
 
@@ -63,6 +64,9 @@ int check_config(const xgi::ClusterConfig& c) {
         std::cout << std::format("  pool {:<16} {} group(s) x {} node(s), context {}, slots {}  model {}\n", p.name,
                                  p.groups, p.nodes_per_group, p.context, c.slots_for(p), p.model_file);
     std::cout << std::format("  spares {}  -> needs {} live nodes\n", c.spares, c.total_nodes_requested() + c.spares);
+    if (c.console.enabled)
+        std::cout << std::format("  console /ui/: generate with pool '{}' via {}, exec {}\n", c.console_model(),
+                                 c.console.router_url, c.console.allow_exec ? "ENABLED" : "off");
     return 0;
 }
 
@@ -124,19 +128,24 @@ int main(int argc, char** argv) {
         xgi::log::warn("no cluster token set (QWEN_CLUSTER_TOKEN): control plane is UNAUTHENTICATED");
 
     std::unique_ptr<xgi::Coordinator> coordinator;
+    std::unique_ptr<xgi::Console> console;
     std::unique_ptr<xgi::Router> router;
     httplib::Server coord_srv, router_srv;
 
     if (run_coord) {
         coordinator = std::make_unique<xgi::Coordinator>(cfg);
         configure_server(coord_srv, 64);
-        // Every endpoint except /health needs X-Cluster-Token (ADR-004).
+        // Every endpoint except /health and the console's static files needs X-Cluster-Token (ADR-004, ADR-009).
         coord_srv.set_pre_routing_handler([&cfg](const httplib::Request& req, httplib::Response& res) {
             if (req.path == "/health") return httplib::Server::HandlerResponse::Unhandled;
+            if (cfg.console.enabled && xgi::Console::is_public_path(req.path))
+                return httplib::Server::HandlerResponse::Unhandled;
             return xgi::check_cluster_token(req, res, cfg.cluster_token) ? httplib::Server::HandlerResponse::Unhandled
                                                                          : httplib::Server::HandlerResponse::Handled;
         });
         coordinator->register_routes(coord_srv);
+        console = std::make_unique<xgi::Console>(cfg, *coordinator);
+        console->register_routes(coord_srv);
         if (!coord_srv.bind_to_port(cfg.coordinator.host, cfg.coordinator.port)) {
             xgi::log::error("coordinator: cannot listen on {}:{}", cfg.coordinator.host, cfg.coordinator.port);
             return 1;
@@ -144,6 +153,10 @@ int main(int argc, char** argv) {
         g_servers.push_back(&coord_srv);
         xgi::log::info("XGI {} coordinator listening on {}:{} ({} pool(s), spares {})", xgi::kVersion,
                        cfg.coordinator.host, cfg.coordinator.port, cfg.pools.size(), cfg.spares);
+        if (cfg.console.enabled)
+            xgi::log::info("console at http://{}:{}/ui/ (code generation via pool '{}', exec {})",
+                           cfg.coordinator.host == "0.0.0.0" ? "127.0.0.1" : cfg.coordinator.host, cfg.coordinator.port,
+                           cfg.console_model(), cfg.console.allow_exec ? "ENABLED" : "off");
     }
     if (run_router) {
         router = std::make_unique<xgi::Router>(cfg);

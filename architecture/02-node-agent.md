@@ -10,6 +10,7 @@
    - `rpc` → `rpc-server` (worker role)
    - `head` → `llama-server` (head role)
 4. Expose a small, **token-protected** control API that the coordinator calls.
+5. Report the **language runtimes** on its `PATH`, and, only if started with `--allow-exec`, run console programs with them (§9, [ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)).
 
 The agent has **no scheduling logic**. It never decides on its own to start or stop inference. It only does what the coordinator tells it.
 
@@ -29,6 +30,9 @@ The agent has **no scheduling logic**. It never decides on its own to start or s
 | `--head-port` | `8080` | Port `llama-server` listens on |
 | `--rpc-server-bin` / `--llama-server-bin` | — | Override the binary paths. Tests use `mock-rpc-server.exe` / `mock-llama-server.exe`. A `.py` path runs with `python` from `PATH`. |
 | `--heartbeat-s` | `5` | Heartbeat interval |
+| `--allow-exec` | off | Allow `POST /exec` (console code execution, §9) |
+| `--exec-dir` | `exec` | Working directory for console programs |
+| `--exec-max-timeout-s` | `300` | Longest run a console job may ask for |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
 The agent reports its port overrides in its registration, so several agents can run on one machine during development.
@@ -59,6 +63,7 @@ All endpoints require `X-Cluster-Token` when a token is configured. Request and 
 | POST | `/head/start` | (Re)start `llama-server` with a model and a list of RPC endpoints |
 | POST | `/stop` | Stop `rpc`, `head`, or `all` |
 | GET | `/logs/{role}?lines=N` | The last N lines (up to 500) of a child process's output |
+| POST | `/exec` | Run a console program (only with `--allow-exec`, §9) |
 
 ### 4.1 Command lines the agent builds
 
@@ -95,15 +100,42 @@ llama-server -m <models_dir>/<model_file> --host 0.0.0.0 --port <head_port>
 ## 6. Safety constraints
 
 - `model_file` is a path **relative to `--models-dir`**. The agent resolves it and refuses anything outside the models folder, which blocks path traversal ([ADR-005](../adr/ADR-005-model-files-relative-to-models-dir.md)).
-- The agent only ever runs the two configured llama.cpp binaries.
+- Without `--allow-exec`, the agent only ever runs the two configured llama.cpp binaries (plus a `--version` probe of each language runtime at startup). With it, it also runs console programs (§9).
 - `extra_args` are passed straight to `llama-server`. They are trusted because the caller holds the cluster token ([06-security.md](06-security.md)).
 
 ## 7. Node facts reported
 
-`node_id`, `hostname`, `ip`, `agent_port`, `rpc_port`, `head_port`, `ram_total`, `ram_available`, `cpu_physical`, `cpu_logical`, `os`, `models[]`, `processes{rpc, head}`.
+`node_id`, `hostname`, `ip`, `agent_port`, `rpc_port`, `head_port`, `ram_total`, `ram_available`, `cpu_physical`, `cpu_logical`, `os`, `arch`, `cpu_model`, `disk_free`, `models[]`, `processes{rpc, head}`, `binaries{rpc_server, llama_server}`, `runtimes[]`, `exec_enabled`, `agent_version`.
 
 ## 8. Running as a service
 
 On Windows, register the agent as a Task Scheduler task that runs **at startup as SYSTEM**. The command is in the [setup guide §7.6](../distributed-qwen-cluster.md#76-run-the-node-agent-as-a-startup-service). On Linux it runs as a systemd unit, and on macOS as a launchd daemon (`scripts/install-xi-service.sh`).
 
 Also on each node: turn off sleep and hibernation, and set the Wi-Fi adapter power mode to *Maximum Performance*.
+
+## 9. Language runtimes and console programs
+
+At startup the agent looks for each known runtime on `PATH` and runs its version probe in parallel (5 s timeout each). A runtime counts only if the probe exits with 0, so the Microsoft Store `python` stub is skipped. On Windows, `System32\bash.exe` (the WSL launcher) is skipped too, because it can't run a Windows path; Git Bash is used if present. The list is fixed until the agent restarts.
+
+| Language id | Executables tried | How a program runs |
+|---|---|---|
+| `python` | `python`, `py`, `python3` (POSIX: `python3`, `python`) | `python -X utf8 main.py` |
+| `javascript` | `node` | `node main.js` |
+| `powershell` / `pwsh` | `powershell` (Windows) / `pwsh` | `-NoProfile -NonInteractive -ExecutionPolicy Bypass -File main.ps1` |
+| `bash` / `sh` | `bash` / `sh` (POSIX) | `bash main.sh` |
+| `cmd` | `cmd` (Windows) | `cmd /d /c main.cmd` |
+| `ruby`, `perl`, `php`, `lua` | same name | `<exe> main.<ext>` |
+| `go` | `go` | `go run main.go` |
+| `java` | `java` (11+) | `java Main.java` (single-file source launch) |
+| `c` / `cpp` / `rust` | `gcc`, `clang`, `cc` / `g++`, `clang++`, `c++` / `rustc` | compile to `main[.exe]`, then run it |
+
+`POST /exec` (schema in [05 §3](05-protocols-and-data.md#3-agent-api)):
+
+1. Returns `403` unless the agent runs with `--allow-exec`, `400` if the language isn't detected, and `429` if 2 jobs are already running.
+2. Writes the code to `<exec-dir>/.jobs/<random id>/main.<ext>`. `.ps1` files get a UTF-8 BOM for Windows PowerShell 5.1, and `.cmd` files get CRLF line endings.
+3. Runs it with `<exec-dir>` as the working directory and empty stdin, under the same supervision as llama.cpp (§5): a kill-on-close job object on Windows, and a process group on POSIX. At the timeout, the whole process tree is killed.
+4. Returns the exit code, duration and the last 500 output lines, then deletes the job folder. Files the program writes to `<exec-dir>` stay.
+
+Each run is logged in `xi.log`, and its output is appended to `logs/exec.log`.
+
+> ⚠️ Programs run with the agent's account and rights. The scheduled task runs as **SYSTEM**, so on Windows a console program can do anything on that PC. Only use `--allow-exec` on nodes where that is acceptable, or run the agent as a dedicated low-privilege user ([06-security.md](06-security.md) T10).

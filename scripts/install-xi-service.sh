@@ -3,6 +3,7 @@
 # The Linux/macOS counterpart of install-xi-task.ps1 (architecture/02-node-agent.md §8).
 #
 # Usage (as root):  sudo ./install-xi-service.sh http://192.168.1.10:8100 [/opt/qwen-cluster]
+# Set XI_ALLOW_EXEC=1 to let the XGI web console run code on this node (ADR-009; runs as root).
 # The token is read from /etc/qwen-cluster.env (QWEN_CLUSTER_TOKEN=...), which this script
 # creates with mode 600 if it is missing.
 set -eu
@@ -20,6 +21,10 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 ARGS="--coordinator $COORDINATOR --llama-dir $ROOT/llama.cpp --models-dir $ROOT/models --log-dir $ROOT/logs"
+if [ "${XI_ALLOW_EXEC:-0}" = 1 ]; then
+    echo "warning: console code execution is ON: the cluster token can run programs on this machine" >&2
+    ARGS="$ARGS --allow-exec --exec-dir $ROOT/exec"
+fi
 
 case "$(uname -s)" in
 Linux)

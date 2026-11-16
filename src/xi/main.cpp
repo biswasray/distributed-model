@@ -31,6 +31,9 @@ Usage: xi --coordinator http://<control-ip>:8100 [options]
   --rpc-server-bin PATH    Override rpc-server binary (.py runs with python)
   --llama-server-bin PATH  Override llama-server binary (.py runs with python)
   --heartbeat-s SECONDS    Heartbeat interval (default 5)
+  --allow-exec             Let the XGI console run code on this node (POST /exec). Off by default.
+  --exec-dir DIR           Working directory for console programs (default ./exec)
+  --exec-max-timeout-s S   Longest run a console job may ask for (default 300)
   --log-level LEVEL        debug | info | warn | error (default info)
   --version                Print the version
 )";
@@ -38,7 +41,7 @@ Usage: xi --coordinator http://<control-ip>:8100 [options]
 }  // namespace
 
 int main(int argc, char** argv) {
-    xgi::CliArgs args(argc, argv);
+    xgi::CliArgs args(argc, argv, {"--help", "-h", "--version", "--allow-exec"});
     if (args.has("--help") || args.has("-h")) {
         std::cout << kUsage;
         return 0;
@@ -50,7 +53,8 @@ int main(int argc, char** argv) {
     static const std::set<std::string> known = {
         "--coordinator", "--token",  "--host",      "--port",           "--name",
         "--advertise-ip", "--llama-dir", "--models-dir", "--log-dir",   "--rpc-port",
-        "--head-port",   "--rpc-server-bin", "--llama-server-bin", "--heartbeat-s", "--log-level"};
+        "--head-port",   "--rpc-server-bin", "--llama-server-bin", "--heartbeat-s", "--log-level",
+        "--allow-exec",  "--exec-dir",  "--exec-max-timeout-s"};
     if (auto bad = args.unknown(known); !bad.empty()) {
         std::cerr << "xi: unknown option " << bad.front() << "\n\n" << kUsage;
         return 2;
@@ -77,6 +81,10 @@ int main(int argc, char** argv) {
         if (auto v = args.get("--llama-server-bin")) o.llama_server_bin = xgi::path_from_utf8(*v);
         o.heartbeat_s = args.get_double("--heartbeat-s", o.heartbeat_s);
         if (o.heartbeat_s <= 0) throw std::invalid_argument("--heartbeat-s must be > 0");
+        o.allow_exec = args.has("--allow-exec");
+        if (auto v = args.get("--exec-dir")) o.exec_dir = xgi::path_from_utf8(*v);
+        o.exec_max_timeout_s = args.get_double("--exec-max-timeout-s", o.exec_max_timeout_s);
+        if (o.exec_max_timeout_s <= 0) throw std::invalid_argument("--exec-max-timeout-s must be > 0");
     } catch (const std::exception& e) {
         std::cerr << "xi: " << e.what() << "\n";
         return 2;

@@ -9,6 +9,7 @@
 3. Drive each group's **lifecycle**: start workers, start the head, wait for health, stop.
 4. **Detect failures and repair** groups automatically.
 5. Expose cluster state to the router and to operators.
+6. Serve the **web console** (§10): a dashboard of nodes and groups, and a chat box that generates code with the cluster's model and runs it on a node.
 
 ## 2. State model
 
@@ -22,6 +23,7 @@ All state lives **in memory** ([ADR-006](../adr/ADR-006-in-memory-coordinator-st
 | `ram_total`, `ram_available`, `cpu_physical` | register / heartbeat | Used by placement |
 | `models[]` | register | GGUF files on the node's disk, relative to its models dir |
 | `processes` | heartbeat | `{rpc, head}` → `stopped` / `running` / `exited` |
+| `os`, `arch`, `cpu_model`, `disk_free`, `binaries`, `runtimes[]`, `exec_enabled` | register | Shown by the console. Not used by placement. |
 | `last_seen` | heartbeat | Wall-clock time of the last heartbeat |
 | `status` | derived | `alive` or `dead` (no heartbeat for `node_timeout_s`) |
 | `draining` | operator | If true, the node is never picked for new placements |
@@ -151,8 +153,12 @@ A node that comes back after being marked dead gets `404` on its next heartbeat,
 | POST | `/groups/{id}/restart` | operator | Stop and start one group with the same members, if they're all alive. Otherwise the group is repaired, which re-places it. |
 | POST | `/drain/{node_id}` | operator | Exclude the node from placement. If it's in a group, the group is repaired without it. |
 | POST | `/undrain/{node_id}` | operator | Make the node eligible again |
+| GET | `/`, `/ui/…` | browser | Console page and its static files. **No authentication.** |
+| GET | `/console/info` | console | Console settings |
+| POST | `/console/generate` | console | Generate a program through the router |
+| POST | `/console/exec` | console | Run a program on a node through its agent's `/exec` |
 
-Every endpoint except `/health` requires `X-Cluster-Token`. Schemas are in [05-protocols-and-data.md](05-protocols-and-data.md#2-coordinator-api).
+Every endpoint except `/health` and the console's static files requires `X-Cluster-Token`. Schemas are in [05-protocols-and-data.md](05-protocols-and-data.md#2-coordinator-api).
 
 ## 8. Concurrency rules
 
@@ -163,3 +169,12 @@ Every endpoint except `/health` requires `X-Cluster-Token`. Schemas are in [05-p
 ## 9. Restart behaviour
 
 When the coordinator restarts, it starts with no state. Agents get a 404 on their next heartbeat and re-register within about 5 seconds. Any llama.cpp processes still running are **not adopted**. The operator runs `POST /deploy` again, which restarts them. Workers reload from their tensor cache, so a redeploy is quick.
+
+## 10. Web console
+
+[ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md). Plain HTML, CSS and JavaScript, embedded in `xgi` at build time (`src/xgi/ui/`, `cmake/EmbedAssets.cmake`), and served at `http://<coordinator>:8100/ui/`.
+
+- **Auth.** The page has no secrets and loads without a token. It asks for the cluster token, keeps it in `sessionStorage` (or `localStorage` if the operator ticks *Remember*), and sends `X-Cluster-Token` on every call. Static files are served with `Content-Security-Policy: default-src 'none'; script-src 'self'; …; frame-ancestors 'none'`, `X-Frame-Options: DENY` and `nosniff`. Node data is rendered as text only, never as HTML.
+- **Dashboard.** It polls `GET /nodes` and `GET /groups` every 3 s. Node health combines liveness, draining, the group's status and the node's own process states (`Serving`, `Idle`, `Loading`, `Draining`, `Dead`, `<role> exited`). The node drawer shows identity, system facts, processes, llama.cpp binaries, models, and the languages table. It can also drain or undrain the node.
+- **Code console.** The operator picks a node and one of its languages, and describes a task. `POST /console/generate` builds a system prompt with the node's OS, architecture and runtime version, sends it with up to 12 earlier turns to the router (pool `console.model`), and extracts the first fenced code block. The code appears in an editable box. **It is never run automatically.** *Run* calls `POST /console/exec`. The coordinator checks `console.allow_exec`, that the node is alive and has `exec_enabled`, and forwards the call to the agent with a timeout of `timeout_s + 30` s. *Write code myself* skips generation.
+- **Logging.** Each generate and exec request is logged with the node, language, code size and caller address.

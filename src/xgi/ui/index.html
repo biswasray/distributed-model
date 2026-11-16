@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XGI Console</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">◆</span>
+    <span class="brand-name">XGI Console</span>
+    <span class="muted" id="version"></span>
+  </div>
+  <div class="summary" id="summary" aria-live="polite"></div>
+  <div class="top-actions">
+    <span class="refresh" id="refresh-state" title="Last refresh"></span>
+    <button type="button" class="ghost" id="token-btn" title="Set the cluster token">🔑 Token</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="panel nodes-panel" aria-labelledby="nodes-title">
+    <div class="panel-head">
+      <h2 id="nodes-title">Nodes</h2>
+      <div class="panel-tools">
+        <input type="search" id="node-filter" placeholder="Filter by name, IP, OS, language…" aria-label="Filter nodes">
+        <select id="node-status-filter" aria-label="Status filter">
+          <option value="">All</option>
+          <option value="alive">Alive</option>
+          <option value="dead">Dead</option>
+          <option value="free">Free</option>
+          <option value="serving">In a group</option>
+          <option value="exec">Exec enabled</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="nodes" id="nodes-table">
+        <thead>
+          <tr>
+            <th>Node</th><th>Health</th><th>Role</th><th>RAM free</th><th>CPU</th><th>OS</th><th>Languages</th>
+          </tr>
+        </thead>
+        <tbody id="nodes-body"></tbody>
+      </table>
+      <p class="empty" id="nodes-empty" hidden>No nodes have registered yet. Start <code>xi</code> on a node.</p>
+    </div>
+
+    <details class="groups" id="groups-box" open>
+      <summary><h2>Groups</h2> <span class="muted" id="groups-count"></span></summary>
+      <div class="table-wrap">
+        <table class="groups-table">
+          <thead><tr><th>Group</th><th>Status</th><th>Head</th><th>Workers</th><th>Slots</th><th>Note</th></tr></thead>
+          <tbody id="groups-body"></tbody>
+        </table>
+        <p class="empty" id="groups-empty" hidden>Nothing is deployed. Run <code>POST /deploy</code> to start the pools.</p>
+      </div>
+    </details>
+  </section>
+
+  <aside class="panel detail-panel" id="detail" aria-labelledby="detail-title" hidden>
+    <div class="panel-head">
+      <h2 id="detail-title">Node</h2>
+      <button type="button" class="ghost icon" id="detail-close" aria-label="Close">✕</button>
+    </div>
+    <div id="detail-body"></div>
+  </aside>
+
+  <section class="panel chat-panel" aria-labelledby="chat-title">
+    <div class="panel-head">
+      <h2 id="chat-title">Code console</h2>
+      <button type="button" class="ghost" id="chat-clear" title="Start a new conversation">New chat</button>
+    </div>
+    <div class="chat-target">
+      <label>Node
+        <select id="target-node"></select>
+      </label>
+      <label>Language
+        <select id="target-lang"></select>
+      </label>
+      <label class="narrow">Timeout (s)
+        <input type="number" id="target-timeout" min="1" max="3600" step="1" value="60">
+      </label>
+    </div>
+    <p class="notice" id="exec-notice" hidden></p>
+    <div class="chat-log" id="chat-log" aria-live="polite">
+      <div class="chat-hint">
+        <p><strong>Describe a task.</strong> XGI asks the cluster's model to write a program for the selected
+          node and language. Review the code, edit it if needed, then run it on the node.</p>
+        <p class="muted">Example: “List the 5 largest files in the current folder with their sizes in MB.”</p>
+      </div>
+    </div>
+    <form class="chat-input" id="chat-form">
+      <textarea id="prompt" rows="3" placeholder="What should the program do?  (Ctrl+Enter to send)" required></textarea>
+      <div class="chat-actions">
+        <button type="button" class="ghost" id="paste-code" title="Skip generation and run your own code">Write code myself</button>
+        <button type="submit" class="primary" id="send-btn">Generate code</button>
+      </div>
+    </form>
+  </section>
+</main>
+
+<dialog id="token-dialog">
+  <form method="dialog" id="token-form">
+    <h2>Cluster token</h2>
+    <p>The console calls the coordinator API, which needs the cluster token (<code>QWEN_CLUSTER_TOKEN</code>).
+      It is kept in this browser tab only, unless you choose to remember it.</p>
+    <label>Token <input type="password" id="token-input" autocomplete="off" spellcheck="false"></label>
+    <label class="check"><input type="checkbox" id="token-remember"> Remember on this browser</label>
+    <p class="error" id="token-error" hidden></p>
+    <div class="dialog-actions">
+      <button type="button" class="ghost" id="token-forget">Forget token</button>
+      <button type="submit" class="primary" value="ok">Connect</button>
+    </div>
+  </form>
+</dialog>
+
+<template id="tpl-code">
+  <div class="msg assistant">
+    <div class="msg-meta"></div>
+    <div class="code-box">
+      <div class="code-head">
+        <span class="code-lang"></span>
+        <span class="spacer"></span>
+        <button type="button" class="ghost small act-copy">Copy</button>
+        <button type="button" class="ghost small act-raw">Model reply</button>
+      </div>
+      <textarea class="code" spellcheck="false" wrap="off"></textarea>
+      <pre class="raw" hidden></pre>
+      <div class="code-foot">
+        <span class="muted code-target"></span>
+        <span class="spacer"></span>
+        <button type="button" class="primary small act-run">▶ Run</button>
+      </div>
+    </div>
+    <div class="runs"></div>
+  </div>
+</template>
+</body>
+</html>

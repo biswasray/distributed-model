@@ -6,7 +6,7 @@
 
 | Asset | Why it matters |
 |---|---|
-| Node machines | The agent can start processes, so taking over the control plane means running workloads on 50 PCs |
+| Node machines | The agent can start processes, so taking over the control plane means running workloads on 50 PCs. With `--allow-exec`, it means running **any code** on those nodes. |
 | Prompts and responses | May contain sensitive user data, and travel over Wi-Fi |
 | Cluster token | Gives full control-plane access |
 | Model files | Large, but public. Low sensitivity. |
@@ -27,7 +27,7 @@
 | # | Threat | Control | Residual risk |
 |---|---|---|---|
 | T1 | Anyone on the LAN connects to `rpc-server :50052` and runs work or reads memory | Firewall: allow 50052 **only from cluster IPs** on the Private profile | **High if the firewall is misconfigured.** llama.cpp RPC has no auth or encryption. |
-| T2 | A rogue caller tells an agent to start processes | `X-Cluster-Token` on every agent call. Agents only launch the configured llama.cpp binaries. | Token theft = control. Rotate it if leaked. |
+| T2 | A rogue caller tells an agent to start processes | `X-Cluster-Token` on every agent call. Without `--allow-exec`, agents only launch the configured llama.cpp binaries. | Token theft = control. Rotate it if leaked. |
 | T3 | Path traversal through `model_file` | Resolved inside `--models-dir`, otherwise rejected ([ADR-005](../adr/ADR-005-model-files-relative-to-models-dir.md)) | Low |
 | T4 | `extra_args` abused (e.g. `--log-file` to an arbitrary path) | Only callers that hold the token. Set from `cluster.yaml` only. | Accepted |
 | T5 | A rogue node registers and gets assigned prompts | Registration needs the token | A machine with the token is trusted |
@@ -35,6 +35,8 @@
 | T7 | Unauthorized clients use the API | `router.api_keys` | Keys are shared secrets |
 | T8 | Exposure to the internet | Never port-forward. Put a reverse proxy with TLS and auth in front if remote access is needed. | — |
 | T9 | Denial of service by flooding requests | Per-pool `max_queue` → 429 | Not defended against a determined attacker |
+| T10 | Console code execution abused, or a generated program does damage ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)) | Off by default. Needs both `console.allow_exec: true` and `xi --allow-exec`. Token on every call. Generated code is shown for review and never auto-run. Timeout, 2 jobs per node, 256 KB code limit, process tree killed at timeout. Every run is logged. | **High on exec-enabled nodes:** the token = code execution as the agent's account (SYSTEM for the scheduled task). No sandbox, no per-user identity. |
+| T11 | A malicious page or node data attacks the operator's browser | Console served with a strict CSP, `X-Frame-Options: DENY`, `nosniff`. All node data rendered as text. The API needs a custom header, so other sites can't call it cross-origin. | The token in `localStorage` (only if *Remember* is ticked) can be read by anyone using that browser profile |
 
 ## 4. Required hardening checklist
 
@@ -44,6 +46,7 @@
 - [ ] `router.api_keys` is set if anyone other than operators can reach port 8000.
 - [ ] No router port forwarding or UPnP for these ports.
 - [ ] The same llama.cpp release is on all nodes, from the official GitHub releases only.
+- [ ] `console.allow_exec` stays `false` unless you need it. If you turn it on, start `xi --allow-exec` only on the nodes that need it, and preferably run those agents as a dedicated non-admin user instead of SYSTEM.
 
 ## 5. Token rotation
 

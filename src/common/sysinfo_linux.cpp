@@ -77,4 +77,23 @@ std::string os_string() {
     return std::format("Linux-{}-{}", u.release, u.machine);
 }
 
+std::string cpu_model() {
+    std::ifstream f("/proc/cpuinfo");
+    std::string line;
+    // x86: "model name"; many ARM kernels: "Model" or "Hardware".
+    for (const char* key : {"model name", "Model", "Hardware"}) {
+        f.clear();
+        f.seekg(0);
+        while (std::getline(f, line)) {
+            if (line.rfind(key, 0) != 0) continue;
+            auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string v = line.substr(colon + 1);
+            v.erase(0, v.find_first_not_of(" \t"));
+            if (!v.empty()) return v;
+        }
+    }
+    return {};
+}
+
 }  // namespace xgi::sysinfo

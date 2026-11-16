@@ -33,6 +33,8 @@ public:
 
     nlohmann::json nodes_json();
     nlohmann::json groups_json();
+    // One node record as GET /nodes shows it, or nullopt for an unknown node.
+    std::optional<nlohmann::json> node_record(const std::string& node_id);
 
 private:
     struct ProcState {

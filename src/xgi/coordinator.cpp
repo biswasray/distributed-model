@@ -224,6 +224,13 @@ json Coordinator::nodes_json() {
     return out;
 }
 
+std::optional<json> Coordinator::node_record(const std::string& node_id) {
+    std::lock_guard lk(mu_);
+    auto it = nodes_.find(node_id);
+    if (it == nodes_.end()) return std::nullopt;
+    return node_json_locked(it->second);
+}
+
 json Coordinator::groups_json() {
     std::lock_guard lk(mu_);
     json out = json::array();
