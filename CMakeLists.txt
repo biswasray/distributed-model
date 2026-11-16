@@ -120,6 +120,11 @@ target_link_libraries(xgi_lib PUBLIC xgi_common)
 
 add_executable(xgi src/xgi/main.cpp)
 target_link_libraries(xgi PRIVATE xgi_lib)
+# Put a starter cluster.yaml next to the executables (only if none is there, so edits survive rebuilds).
+add_custom_command(TARGET xgi POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}/examples/cluster.yaml"
+            "-DDST=$<TARGET_FILE_DIR:xgi>/cluster.yaml" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyIfMissing.cmake"
+    VERBATIM)
 
 # ---------------------------------------------------------------- tests
 if(XGI_BUILD_TESTS)

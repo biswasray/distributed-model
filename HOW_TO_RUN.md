@@ -81,6 +81,8 @@ cmake --build build/mingw           # -> build/mingw/xgi.exe, xi.exe (static, no
 | `release` (Ninja) | `build/release/xgi`, `build/release/xi` (`.exe` on Windows) | `build/release/tests/` |
 | `vs` | `build\vs\Release\xgi.exe`, `xi.exe` | `build\vs\tests\Release\` |
 
+The build also puts a starter `cluster.yaml` (a copy of `examples/cluster.yaml`) next to the executables, but only if there isn't one yet, so your edits survive rebuilds. To get a fresh copy, delete it and build again. `xgi` reads `./cluster.yaml` from the **current directory**, so run it from that folder or pass `--config`.
+
 The C++ runtime is linked statically where the toolchain allows it (MSVC `/MT`, GCC `-static-libstdc++`, MinGW `-static`), so nodes don't need a runtime installed. Turn this off with `-DXGI_STATIC_RUNTIME=OFF`.
 
 > **Offline build:** download the three archives listed in `cmake/Dependencies.cmake`, extract them, and pass `-DFETCHCONTENT_SOURCE_DIR_HTTPLIB=…`, `-DFETCHCONTENT_SOURCE_DIR_JSON=…`, and `-DFETCHCONTENT_SOURCE_DIR_YAML-CPP=…`.
