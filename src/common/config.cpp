@@ -211,6 +211,127 @@ ClusterConfig parse_config(const std::string& yaml_text, const std::optional<std
     return c;
 }
 
+ClusterConfig default_config(const std::optional<std::string>& env_token) {
+    ClusterConfig c;
+    if (env_token && !env_token->empty()) c.cluster_token = *env_token;
+    return c;
+}
+
+namespace {
+
+void emit_strings(YAML::Emitter& out, const char* key, const std::vector<std::string>& v) {
+    out << YAML::Key << key << YAML::Value << YAML::Flow << YAML::BeginSeq;
+    for (const auto& x : v) out << x;
+    out << YAML::EndSeq;
+}
+
+}  // namespace
+
+std::string to_yaml(const ClusterConfig& c) {
+    YAML::Emitter out;
+    out.SetDoublePrecision(15);
+    out << YAML::BeginMap;
+    out << YAML::Key << "cluster_token" << YAML::Value << YAML::DoubleQuoted << c.cluster_token;
+
+    out << YAML::Key << "coordinator" << YAML::Value << YAML::BeginMap;
+    out << YAML::Key << "host" << YAML::Value << c.coordinator.host;
+    out << YAML::Key << "port" << YAML::Value << c.coordinator.port;
+    out << YAML::Key << "heartbeat_interval_s" << YAML::Value << c.coordinator.heartbeat_interval_s;
+    out << YAML::Key << "node_timeout_s" << YAML::Value << c.coordinator.node_timeout_s;
+    out << YAML::Key << "group_start_timeout_s" << YAML::Value << c.coordinator.group_start_timeout_s;
+    out << YAML::EndMap;
+
+    out << YAML::Key << "router" << YAML::Value << YAML::BeginMap;
+    out << YAML::Key << "host" << YAML::Value << c.router.host;
+    out << YAML::Key << "port" << YAML::Value << c.router.port;
+    out << YAML::Key << "coordinator_url" << YAML::Value << c.router.coordinator_url;
+    out << YAML::Key << "max_queue" << YAML::Value << c.router.max_queue;
+    out << YAML::Key << "queue_timeout_s" << YAML::Value << c.router.queue_timeout_s;
+    out << YAML::Key << "request_timeout_s" << YAML::Value << c.router.request_timeout_s;
+    out << YAML::Key << "slots_per_group" << YAML::Value << c.router.slots_per_group;
+    emit_strings(out, "api_keys", c.router.api_keys);
+    out << YAML::EndMap;
+
+    out << YAML::Key << "llama_cpp" << YAML::Value << YAML::BeginMap;
+    out << YAML::Key << "rpc_cache" << YAML::Value << c.llama_cpp.rpc_cache;
+    emit_strings(out, "extra_head_args", c.llama_cpp.extra_head_args);
+    out << YAML::EndMap;
+
+    out << YAML::Key << "console" << YAML::Value << YAML::BeginMap;
+    out << YAML::Key << "enabled" << YAML::Value << c.console.enabled;
+    out << YAML::Key << "allow_exec" << YAML::Value << c.console.allow_exec;
+    out << YAML::Key << "router_url" << YAML::Value << c.console.router_url;
+    out << YAML::Key << "model" << YAML::Value << YAML::DoubleQuoted << c.console.model;
+    out << YAML::Key << "max_tokens" << YAML::Value << c.console.max_tokens;
+    out << YAML::Key << "generate_timeout_s" << YAML::Value << c.console.generate_timeout_s;
+    out << YAML::Key << "exec_timeout_s" << YAML::Value << c.console.exec_timeout_s;
+    out << YAML::EndMap;
+
+    out << YAML::Key << "pools" << YAML::Value;
+    if (c.pools.empty()) out << YAML::Flow;
+    out << YAML::BeginSeq;
+    for (const auto& p : c.pools) {
+        out << YAML::BeginMap;
+        out << YAML::Key << "name" << YAML::Value << p.name;
+        out << YAML::Key << "model_file" << YAML::Value << p.model_file;
+        out << YAML::Key << "nodes_per_group" << YAML::Value << p.nodes_per_group;
+        out << YAML::Key << "groups" << YAML::Value << p.groups;
+        out << YAML::Key << "context" << YAML::Value << p.context;
+        if (p.parallel) out << YAML::Key << "parallel" << YAML::Value << *p.parallel;
+        if (p.tensor_split) {
+            out << YAML::Key << "tensor_split" << YAML::Value << YAML::Flow << YAML::BeginSeq;
+            for (double d : *p.tensor_split) out << d;
+            out << YAML::EndSeq;
+        }
+        if (!p.extra_args.empty()) emit_strings(out, "extra_args", p.extra_args);
+        out << YAML::EndMap;
+    }
+    out << YAML::EndSeq;
+
+    out << YAML::Key << "spares" << YAML::Value << c.spares;
+    out << YAML::Key << "pinned" << YAML::Value;
+    if (c.pinned.empty()) out << YAML::Flow;
+    out << YAML::BeginSeq;
+    for (const auto& e : c.pinned)
+        out << YAML::Flow << YAML::BeginMap << YAML::Key << "host" << YAML::Value << e.host << YAML::Key << "role"
+            << YAML::Value << e.role << YAML::Key << "pool" << YAML::Value << e.pool << YAML::EndMap;
+    out << YAML::EndSeq;
+    out << YAML::EndMap;
+    return std::string("# Qwen Cluster configuration (schema: architecture/05-protocols-and-data.md section 5).\n") +
+           out.c_str() + "\n";
+}
+
+nlohmann::json to_json(const ClusterConfig& c) {
+    using nlohmann::json;
+    json pools = json::array();
+    for (const auto& p : c.pools) {
+        json j{{"name", p.name},       {"model_file", p.model_file}, {"nodes_per_group", p.nodes_per_group},
+               {"groups", p.groups},   {"context", p.context},       {"extra_args", p.extra_args}};
+        j["parallel"] = p.parallel ? json(*p.parallel) : json(nullptr);
+        j["tensor_split"] = p.tensor_split ? json(*p.tensor_split) : json(nullptr);
+        pools.push_back(std::move(j));
+    }
+    json pinned = json::array();
+    for (const auto& e : c.pinned) pinned.push_back({{"host", e.host}, {"role", e.role}, {"pool", e.pool}});
+    const auto& k = c.coordinator;
+    const auto& r = c.router;
+    const auto& n = c.console;
+    return json{
+        {"coordinator", {{"host", k.host}, {"port", k.port}, {"heartbeat_interval_s", k.heartbeat_interval_s},
+                         {"node_timeout_s", k.node_timeout_s}, {"group_start_timeout_s", k.group_start_timeout_s}}},
+        {"router", {{"host", r.host}, {"port", r.port}, {"coordinator_url", r.coordinator_url}, {"max_queue", r.max_queue},
+                    {"queue_timeout_s", r.queue_timeout_s}, {"request_timeout_s", r.request_timeout_s},
+                    {"slots_per_group", r.slots_per_group}, {"api_keys", r.api_keys}}},
+        {"llama_cpp", {{"rpc_cache", c.llama_cpp.rpc_cache}, {"extra_head_args", c.llama_cpp.extra_head_args}}},
+        {"console", {{"enabled", n.enabled}, {"allow_exec", n.allow_exec}, {"router_url", n.router_url}, {"model", n.model},
+                     {"max_tokens", n.max_tokens}, {"generate_timeout_s", n.generate_timeout_s},
+                     {"exec_timeout_s", n.exec_timeout_s}}},
+        {"pools", pools},
+        {"spares", c.spares},
+        {"pinned", pinned},
+    };
+}
+
 ClusterConfig load_config(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) throw ConfigError("cannot open config file " + path.string());

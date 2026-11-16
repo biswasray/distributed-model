@@ -156,7 +156,8 @@
 
   async function poll() {
     clearTimeout(state.pollTimer);
-    const [n, g] = await Promise.all([api("GET", "/nodes"), api("GET", "/groups")]);
+    const [n, g, hl] = await Promise.all([api("GET", "/nodes"), api("GET", "/groups"), api("GET", "/health")]);
+    if (hl.status === 200 && hl.json) state.deployed = !!hl.json.deployed;
     if (n.status === 200 && g.status === 200) {
       state.nodes = (n.json || []).slice().sort((a, b) => String(a.node_id).localeCompare(String(b.node_id), undefined, { numeric: true }));
       state.groups = g.json || [];
@@ -296,6 +297,37 @@
     $("groups-body").replaceChildren(...rows);
     $("groups-empty").hidden = state.groups.length > 0;
     $("groups-count").textContent = state.groups.length ? state.groups.length + " group(s)" : "";
+    renderDeployButtons();
+  }
+
+  // ------------------------------------------------------------------ deploy actions
+
+  function renderDeployButtons() {
+    if (state.deployBusy) return;
+    const pools = (state.info && state.info.pools) || [];
+    $("deploy-btn").hidden = !!state.deployed;
+    $("redeploy-btn").hidden = !state.deployed;
+    $("undeploy-btn").hidden = !state.deployed;
+    $("deploy-btn").disabled = !pools.length;
+    $("deploy-btn").title = pools.length ? "Plan and start every pool" : "No pools are configured. Add one on the Configuration page.";
+    $("deploy-state").textContent = state.deployed ? "Deployed" : pools.length ? "Not deployed" : "No pools configured";
+  }
+
+  async function deployAction(kind) {
+    const ask = {
+      redeploy: "Stop every group and start the pools again from the current configuration?\n\nThe cluster can't answer requests until the models have loaded again.",
+      undeploy: "Stop every group? Requests in flight will fail.",
+    }[kind];
+    if (ask && !confirm(ask)) return;
+    const path = { deploy: "/deploy", redeploy: "/deploy?force=true", undeploy: "/undeploy" }[kind];
+    state.deployBusy = true;
+    for (const id of ["deploy-btn", "redeploy-btn", "undeploy-btn"]) $(id).disabled = true;
+    $("deploy-state").textContent = { deploy: "Deploying…", redeploy: "Redeploying…", undeploy: "Stopping groups…" }[kind];
+    const r = await api("POST", path);
+    state.deployBusy = false;
+    for (const id of ["redeploy-btn", "undeploy-btn"]) $(id).disabled = false;
+    if (r.status !== 200) alert(kind[0].toUpperCase() + kind.slice(1) + " failed: " + r.error);
+    await poll();
   }
 
   // ------------------------------------------------------------------ node detail
@@ -632,15 +664,251 @@
     });
   }
 
+  // ------------------------------------------------------------------ views
+
+  function showView(view) {
+    for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.view === view);
+    $("cluster-view").hidden = view !== "cluster";
+    $("config-view").hidden = view !== "config";
+    if (view !== "cluster" && !$("detail").hidden) closeDetail();
+    if (view === "config" && !cfg.loaded) loadConfig();
+    const hash = view === "cluster" ? "" : "#" + view;
+    if (location.hash !== hash) history.replaceState(null, "", location.pathname + hash);
+  }
+
+  // ------------------------------------------------------------------ configuration editor
+
+  const cfg = { loaded: null, draft: null, mode: "form", dirty: false };
+
+  // [key, label, type, help, restart?] per field; `key: null` = top-level keys.
+  const SECTIONS = [
+    { key: null, title: "Placement", fields: [["spares", "Spare nodes", "int", "Kept free for automatic failover."]] },
+    { key: "console", title: "Code console", fields: [
+      ["allow_exec", "Allow running code on nodes", "bool", "Nodes must also run xi --allow-exec. Code always needs a click on Run."],
+      ["model", "Pool that writes code", "pool", "Empty = the first pool."],
+      ["router_url", "Router URL", "text", "Where code generation requests go."],
+      ["max_tokens", "Max tokens per answer", "int"],
+      ["generate_timeout_s", "Generation timeout (s)", "num"],
+      ["exec_timeout_s", "Default run timeout (s)", "num"],
+      ["enabled", "Serve the web console", "bool", "Turning this off removes this page after the restart.", true],
+    ] },
+    { key: "llama_cpp", title: "llama.cpp", fields: [
+      ["rpc_cache", "Worker tensor cache (rpc-server -c)", "bool", "Workers reload from local disk instead of over Wi-Fi."],
+      ["extra_head_args", "Extra llama-server arguments", "list", "Space-separated, added to every head. Use YAML for values with spaces."],
+    ] },
+    { key: "coordinator", title: "Coordinator", restart: true, fields: [
+      ["host", "Listen address", "text"], ["port", "Port", "int"],
+      ["heartbeat_interval_s", "Heartbeat interval (s)", "num"], ["node_timeout_s", "Node timeout (s)", "num"],
+      ["group_start_timeout_s", "Group start timeout (s)", "num", "First loads over Wi-Fi can take an hour or more."],
+    ] },
+    { key: "router", title: "Router", restart: true, fields: [
+      ["host", "Listen address", "text"], ["port", "Port", "int"], ["coordinator_url", "Coordinator URL", "text"],
+      ["max_queue", "Max queued requests per pool", "int"], ["queue_timeout_s", "Queue timeout (s)", "num"],
+      ["request_timeout_s", "Request timeout (s)", "num"], ["slots_per_group", "Default slots per group", "int"],
+      ["api_keys", "Client API keys", "list", "Space-separated. Empty = clients need no key."],
+    ] },
+  ];
+
+  function markDirty() { cfg.dirty = true; }
+
+  function cfgField(obj, [name, label, type, help, restart]) {
+    let input;
+    if (type === "bool") {
+      input = h("input", { type: "checkbox" });
+      input.checked = !!obj[name];
+      input.addEventListener("change", () => { obj[name] = input.checked; markDirty(); });
+    } else if (type === "pool") {
+      input = h("select");
+      const fill = () => {
+        const cur = obj[name] || "";
+        input.replaceChildren(h("option", { value: "", text: "(first pool)" }),
+          ...cfg.draft.pools.filter((p) => p.name).map((p) => h("option", { value: p.name, text: p.name })));
+        if (cur && !cfg.draft.pools.some((p) => p.name === cur)) input.append(h("option", { value: cur, text: cur + " (not a pool)" }));
+        input.value = cur;
+      };
+      fill();
+      input.addEventListener("focus", fill);
+      input.addEventListener("change", () => { obj[name] = input.value; markDirty(); });
+    } else if (type === "list") {
+      input = h("input", { type: "text", spellcheck: "false" });
+      input.value = (obj[name] || []).join(" ");
+      input.addEventListener("input", () => { const v = input.value.trim(); obj[name] = v ? v.split(/\s+/) : []; markDirty(); });
+    } else {
+      const numeric = type === "int" || type === "num";
+      input = h("input", { type: numeric ? "number" : "text", step: type === "int" ? "1" : numeric ? "any" : null, spellcheck: "false" });
+      input.value = obj[name] ?? "";
+      input.addEventListener("input", () => { obj[name] = numeric ? (input.value === "" ? null : Number(input.value)) : input.value; markDirty(); });
+    }
+    const isBool = type === "bool";
+    return h("label", { class: isBool ? "cfg-field check" : "cfg-field" }, isBool ? input : null,
+      h("span", { class: "cfg-label" }, label, restart ? h("span", { class: "badge warn", text: "after restart" }) : null),
+      isBool ? null : input,
+      help ? h("span", { class: "cfg-help", text: help }) : null);
+  }
+
+  function poolsSection() {
+    const d = cfg.draft;
+    const need = h("span", { class: "muted" });
+    const updateNeed = () => {
+      const total = d.pools.reduce((s, p) => s + (Number(p.nodes_per_group) || 0) * (Number(p.groups) || 0), 0) + (Number(d.spares) || 0);
+      const alive = state.nodes.filter((n) => n.status === "alive").length;
+      need.textContent = `Needs ${total} node(s) including spares · ${alive} alive now`;
+      need.className = total > alive ? "err-text" : "muted";
+    };
+    const num = (p, k, min, allowNull) => {
+      const i = h("input", { type: "number", min: String(min), step: "1", class: "num" });
+      i.value = p[k] ?? "";
+      if (allowNull) i.placeholder = "default";
+      i.addEventListener("input", () => { p[k] = i.value === "" ? (allowNull ? null : 0) : Number(i.value); markDirty(); updateNeed(); });
+      return h("td", null, i);
+    };
+    const txt = (p, k, ph) => {
+      const i = h("input", { type: "text", placeholder: ph, spellcheck: "false" });
+      i.value = p[k] ?? "";
+      i.addEventListener("input", () => { p[k] = i.value.trim(); markDirty(); });
+      return h("td", null, i);
+    };
+    const body = h("tbody");
+    const rows = () => body.replaceChildren(...d.pools.map((p, idx) => h("tr", null,
+      txt(p, "name", "qwen3-30b-a3b"), txt(p, "model_file", "Qwen3-30B-A3B-Q4_K_M.gguf"),
+      num(p, "nodes_per_group", 1), num(p, "groups", 0), num(p, "context", 1), num(p, "parallel", 1, true),
+      h("td", null, h("button", { type: "button", class: "ghost small", title: "Remove this pool",
+        onclick: () => { d.pools.splice(idx, 1); markDirty(); rows(); updateNeed(); } }, "✕")))));
+    rows();
+    updateNeed();
+    const add = h("button", { type: "button", class: "small", onclick: () => {
+      d.pools.push({ name: "", model_file: "", nodes_per_group: 1, groups: 1, context: 4096, parallel: null, tensor_split: null, extra_args: [] });
+      markDirty(); rows(); updateNeed();
+    } }, "+ Add pool");
+    // Spares live in another section; keep the node count in step with it.
+    cfg.updateNeed = updateNeed;
+    return h("fieldset", { class: "cfg-section wide" },
+      h("legend", null, "Model pools ", h("span", { class: "badge ok", text: "applies now" })),
+      h("p", { class: "cfg-help", text: "Saving updates the plan at once. Running groups keep their old layout until you redeploy. model_file is relative to each head's --models-dir. Use YAML for tensor_split, extra_args and pinned heads; the form keeps them as they are." }),
+      h("div", { class: "table-wrap" }, h("table", { class: "mini pools-edit" },
+        h("thead", null, h("tr", null, ["Name", "Model file", "Nodes / group", "Groups", "Context", "Slots", ""].map((t) => h("th", { text: t })))),
+        body)),
+      h("div", { class: "cfg-row" }, add, h("span", { class: "spacer" }), need));
+  }
+
+  function renderCfgForm() {
+    const d = cfg.draft;
+    const sections = SECTIONS.map((s) => {
+      const obj = s.key ? d[s.key] : d;
+      return h("fieldset", { class: "cfg-section" },
+        h("legend", null, s.title + " ", h("span", { class: "badge " + (s.restart ? "warn" : "ok"), text: s.restart ? "after restart" : "applies now" })),
+        s.fields.map((f) => cfgField(obj, f)));
+    });
+    $("cfg-form").replaceChildren(poolsSection(), ...sections);
+  }
+
+  function renderCfgStatus() {
+    const j = cfg.loaded;
+    const tokenText = j.token_set ? (j.token_from_env ? "set by QWEN_CLUSTER_TOKEN" : "set in cluster.yaml (edit it in YAML)")
+                                  : "NOT SET: the control plane is unauthenticated";
+    const items = [
+      h("div", null, h("span", { class: "muted", text: "File " }), h("code", { text: j.path }), " ",
+        j.file_exists ? h("span", { class: "badge ok", text: "loaded" }) : h("span", { class: "badge warn", text: "not created yet" })),
+      j.file_exists ? null : h("div", { class: "notice-inline", text: "No cluster.yaml was found, so XGI is running with built-in defaults (no pools). Saving creates the file." }),
+      h("div", { class: "muted", text: "Cluster token: " + tokenText }),
+      j.parse_error ? h("div", { class: "err-text", text: "The file on disk has an error, so the form shows the running settings: " + j.parse_error }) : null,
+      (j.restart_pending || []).length ? h("div", { class: "notice-inline", text: "Saved but not running yet (restart XGI to apply): " + j.restart_pending.join(", ") }) : null,
+    ];
+    $("cfg-status").replaceChildren(...items.filter(Boolean));
+  }
+
+  async function loadConfig(keepResult) {
+    const r = await api("GET", "/console/config");
+    if (r.status !== 200) {
+      $("cfg-status").replaceChildren(h("div", { class: "err-text", text: "Cannot load the configuration: " + r.error }));
+      return;
+    }
+    cfg.loaded = r.json;
+    cfg.draft = structuredClone(r.json.config);
+    cfg.dirty = false;
+    $("cfg-yaml").value = r.json.yaml;
+    renderCfgStatus();
+    renderCfgForm();
+    if (r.json.parse_error && cfg.mode === "form") setCfgMode("yaml", true);
+    if (!keepResult) $("cfg-result").hidden = true;
+  }
+
+  function setCfgMode(mode, force) {
+    if (mode === cfg.mode) return;
+    if (cfg.dirty && !force && !confirm("Discard your unsaved changes in the " + cfg.mode.toUpperCase() + " editor?")) return;
+    if (cfg.dirty) loadConfig();
+    cfg.mode = mode;
+    $("cfg-mode-form").classList.toggle("active", mode === "form");
+    $("cfg-mode-yaml").classList.toggle("active", mode === "yaml");
+    $("cfg-form").hidden = mode !== "form";
+    $("cfg-yaml-wrap").hidden = mode !== "yaml";
+  }
+
+  function showCfgResult(r, save) {
+    const box = $("cfg-result");
+    const j = r.json || {};
+    box.hidden = false;
+    if (r.status !== 200) {
+      box.className = "cfg-result bad";
+      box.replaceChildren(h("b", { text: save ? "Not saved. " : "Invalid. " }), j.error || r.error || "unknown error");
+      return;
+    }
+    const live = j.live || [], restart = j.restart || [], warnings = j.warnings || [];
+    const layout = live.some((k) => ["pools", "spares", "pinned"].includes(k) || k.startsWith("llama_cpp"));
+    box.className = "cfg-result ok";
+    box.replaceChildren(...[
+      h("div", null, h("b", { text: save ? "Saved " : "Valid. " }), save ? h("code", { text: j.path }) : "Nothing was saved."),
+      h("div", null, (save ? "Applied now: " : "Would apply at once: ") + (live.length ? live.join(", ") : "nothing changed")),
+      restart.length ? h("div", { class: "warn-text", text: "Takes effect after XGI restarts: " + restart.join(", ") }) : null,
+      warnings.length ? h("ul", { class: "warn-list" }, warnings.map((w) => h("li", { text: w }))) : null,
+      save && layout && state.deployed ? h("div", { class: "cfg-row" }, h("span", { text: "Running groups still use the old layout." }),
+        h("button", { type: "button", class: "primary small", onclick: () => { showView("cluster"); deployAction("redeploy"); } }, "Redeploy now")) : null,
+    ].filter(Boolean));
+  }
+
+  async function submitCfg(save) {
+    const body = cfg.mode === "yaml" ? { yaml: $("cfg-yaml").value } : { config: cfg.draft };
+    if (cfg.mode === "form" && save && cfg.loaded.file_exists &&
+        !confirm("Saving from the form rewrites cluster.yaml in a standard layout, and its comments are dropped (a copy is kept as cluster.yaml.bak). Use the YAML editor to keep comments.\n\nSave now?")) return;
+    for (const id of ["cfg-check", "cfg-save"]) $(id).disabled = true;
+    const r = await api(save ? "PUT" : "POST", save ? "/console/config" : "/console/config/check", body);
+    for (const id of ["cfg-check", "cfg-save"]) $(id).disabled = false;
+    showCfgResult(r, save);
+    if (save && r.status === 200) {
+      await loadConfig(true);
+      const info = await api("GET", "/console/info");
+      if (info.status === 200) state.info = info.json;
+      renderExecNotice();
+      refreshRunButtons();
+      renderDeployButtons();
+    }
+  }
+
+  function initConfig() {
+    for (const t of document.querySelectorAll(".tab")) t.addEventListener("click", () => showView(t.dataset.view));
+    $("cfg-mode-form").addEventListener("click", () => setCfgMode("form"));
+    $("cfg-mode-yaml").addEventListener("click", () => setCfgMode("yaml"));
+    $("cfg-yaml").addEventListener("input", markDirty);
+    $("cfg-form").addEventListener("input", () => { if (cfg.updateNeed) cfg.updateNeed(); });
+    $("cfg-reload").addEventListener("click", () => { if (!cfg.dirty || confirm("Discard your unsaved changes?")) loadConfig(); });
+    $("cfg-check").addEventListener("click", () => submitCfg(false));
+    $("cfg-save").addEventListener("click", () => submitCfg(true));
+    $("deploy-btn").addEventListener("click", () => deployAction("deploy"));
+    $("redeploy-btn").addEventListener("click", () => deployAction("redeploy"));
+    $("undeploy-btn").addEventListener("click", () => deployAction("undeploy"));
+    window.addEventListener("beforeunload", (e) => { if (cfg.dirty) e.preventDefault(); });
+  }
+
   // ------------------------------------------------------------------ boot
 
   document.addEventListener("DOMContentLoaded", () => {
     initTokenDialog();
     initConsole();
+    initConfig();
     $("detail-close").addEventListener("click", closeDetail);
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("detail").hidden) closeDetail(); });
     $("node-filter").addEventListener("input", renderNodes);
     $("node-status-filter").addEventListener("change", renderNodes);
-    start();
+    start().then(() => { if (location.hash === "#config") showView("config"); });
   });
 })();

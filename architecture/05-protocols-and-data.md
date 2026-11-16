@@ -146,6 +146,44 @@ Response `200`:
 
 `timeout_s` defaults to `console.exec_timeout_s`. The coordinator forwards the call to the node's `POST /exec` (§3) and adds `node_id` to the agent's response. Errors: `403` if `console.allow_exec` is false or the node has `exec_enabled: false` · `404` unknown node · `409` dead node · `502` agent unreachable · agent `400`/`429` passed through.
 
+#### `GET /console/config`
+
+The config file and the settings XGI is running with (§5.1).
+
+```json
+{
+  "path": "C:\\qwen-cluster\\cluster.yaml",
+  "file_exists": true,
+  "yaml": "<the file's text, or a generated default if it doesn't exist>",
+  "config": { "coordinator": {...}, "router": {...}, "llama_cpp": {...}, "console": {...}, "pools": [...], "spares": 2, "pinned": [] },
+  "running": { "...": "same shape: what is in effect now" },
+  "token_set": true,
+  "token_from_env": true,
+  "restart_pending": ["router.port"],
+  "parse_error": null
+}
+```
+
+`config` and `running` use the `cluster.yaml` keys **without `cluster_token`**. `restart_pending` lists settings that differ between the file and the running process and only apply after a restart. `parse_error` is set when the file on disk is invalid; `config` then shows the running settings.
+
+#### `POST /console/config/check` · `PUT /console/config`
+
+Validate (check) or validate, write and apply (put). The body is one of:
+
+| Body | Meaning |
+|---|---|
+| `{"yaml": "<text>"}` | The new file, written byte-for-byte (comments kept) |
+| `{"config": {<cluster.yaml keys>}}` | The form's settings. They are rendered to YAML in a standard layout (comments dropped), keeping the file's own `cluster_token`. |
+
+Response `200`:
+
+```json
+{"ok": true, "saved": true, "path": "C:\\qwen-cluster\\cluster.yaml", "yaml": "...",
+ "live": ["pools", "spares", "console.max_tokens"], "restart": ["router.port"], "warnings": []}
+```
+
+`live` = changed settings that took effect at once; `restart` = changed settings that apply on the next XGI start. Errors: `400 {"ok": false, "error": "...", ...}` if the config is invalid (the same rules as at startup, §5) · `500` if the file can't be written. On save, the previous file is kept as `cluster.yaml.bak`, and the new one replaces it atomically.
+
 ## 3. Agent API
 
 ### `POST /rpc/start`
@@ -311,3 +349,18 @@ pinned:                      # optional: prefer these nodes as heads for a pool
 Environment `QWEN_CLUSTER_TOKEN` › `cluster.yaml` › built-in defaults.
 
 The console calls the router with the first entry of `router.api_keys` (if any), so the coordinator and router must read the same `cluster.yaml`.
+
+### 5.1 Where XGI finds `cluster.yaml`, and changing it while running
+
+| `--config` | Behaviour |
+|---|---|
+| Given | That file must exist and be valid, otherwise startup fails. |
+| Not given | `./cluster.yaml` (the current folder), then `cluster.yaml` **next to the `xgi` executable**. If neither exists, XGI starts with the built-in defaults above and **no pools**, and logs a warning. A save from the console then creates `cluster.yaml` next to `xgi`. |
+
+A save from the console (`PUT /console/config`) applies these sections at once, without a restart:
+
+| Applies at once | Applies after XGI restarts |
+|---|---|
+| `pools`, `spares`, `pinned`, `llama_cpp`, `console` (except `enabled`) | `cluster_token`, `coordinator.*`, `router.*`, `console.enabled` |
+
+Pool changes update the coordinator's plan. Running groups keep their layout until the next `POST /deploy?force=true`. A router running as its own process (`xgi router`) reads the file only at startup.

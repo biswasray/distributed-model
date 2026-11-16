@@ -157,6 +157,9 @@ A node that comes back after being marked dead gets `404` on its next heartbeat,
 | GET | `/console/info` | console | Console settings |
 | POST | `/console/generate` | console | Generate a program through the router |
 | POST | `/console/exec` | console | Run a program on a node through its agent's `/exec` |
+| GET | `/console/config` | console | The config file and the running settings |
+| POST | `/console/config/check` | console | Validate a new config |
+| PUT | `/console/config` | console | Validate, save and apply a new config (§10.1) |
 
 Every endpoint except `/health` and the console's static files requires `X-Cluster-Token`. Schemas are in [05-protocols-and-data.md](05-protocols-and-data.md#2-coordinator-api).
 
@@ -178,3 +181,12 @@ When the coordinator restarts, it starts with no state. Agents get a 404 on thei
 - **Dashboard.** It polls `GET /nodes` and `GET /groups` every 3 s. Node health combines liveness, draining, the group's status and the node's own process states (`Serving`, `Idle`, `Loading`, `Draining`, `Dead`, `<role> exited`). The node drawer shows identity, system facts, processes, llama.cpp binaries, models, and the languages table. It can also drain or undrain the node.
 - **Code console.** The operator picks a node and one of its languages, and describes a task. `POST /console/generate` builds a system prompt with the node's OS, architecture and runtime version, sends it with up to 12 earlier turns to the router (pool `console.model`), and extracts the first fenced code block. The code appears in an editable box. **It is never run automatically.** *Run* calls `POST /console/exec`. The coordinator checks `console.allow_exec`, that the node is alive and has `exec_enabled`, and forwards the call to the agent with a timeout of `timeout_s + 30` s. *Write code myself* skips generation.
 - **Logging.** Each generate and exec request is logged with the node, language, code size and caller address.
+
+### 10.1 Configuration page
+
+The console's **Configuration** tab (`/ui/#config`) edits `cluster.yaml` ([05 §5.1](05-protocols-and-data.md#51-where-xgi-finds-clusteryaml-and-changing-it-while-running)).
+
+- **Form:** an editable pools table (name, model file, nodes per group, groups, context, slots) with a "needs N nodes, M alive" count, and fields for placement, the code console, llama.cpp, the coordinator and the router. Each section is labelled *applies now* or *after restart*. `tensor_split`, per-pool `extra_args` and `pinned` aren't in the form but are kept. The token is never sent to the browser. Saving from the form rewrites the file in a standard layout without comments.
+- **YAML:** the file as text, saved byte-for-byte.
+- **Validate** runs the startup validation without saving. **Save & apply** writes the file atomically (keeping `cluster.yaml.bak`), then calls `Coordinator::apply_layout`, which replaces the pools, spares, pinned and llama.cpp settings under the state mutex. Lifecycle tasks copy the llama.cpp settings under the lock, so a save never changes a group's start half-way. Running groups keep their members and model until a redeploy. The page offers **Redeploy now** after a layout change.
+- The Cluster tab's Groups section has **Deploy**, **Redeploy** and **Undeploy** buttons (`POST /deploy`, `/deploy?force=true`, `/undeploy`).

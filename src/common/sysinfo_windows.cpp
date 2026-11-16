@@ -72,6 +72,17 @@ std::string os_string() {
     return std::format("Windows-{}-{}.{}.{}-SP0", release, v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber);
 }
 
+std::filesystem::path executable_path() {
+    std::wstring buf(MAX_PATH, L'\0');
+    for (int i = 0; i < 6; ++i) {
+        DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+        if (n == 0) return {};
+        if (n < buf.size()) return std::filesystem::path(buf.substr(0, n));
+        buf.resize(buf.size() * 2);
+    }
+    return {};
+}
+
 std::string cpu_model() {
     wchar_t buf[256]{};
     DWORD size = sizeof(buf);

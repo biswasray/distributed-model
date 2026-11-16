@@ -6,6 +6,7 @@
 #include "common/http_util.hpp"
 #include "common/log.hpp"
 #include "common/util.hpp"
+#include "xgi/config_store.hpp"
 #include "xgi/coordinator.hpp"
 #include "xgi/ui_assets.hpp"
 
@@ -113,14 +114,15 @@ std::string mime_type(std::string_view path) {
 
 // ------------------------------------------------------------------------------------------ routes
 
-Console::Console(const ClusterConfig& cfg, Coordinator& coordinator) : cfg_(cfg), coord_(coordinator) {}
+Console::Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& coordinator)
+    : startup_(startup), store_(store), coord_(coordinator) {}
 
 bool Console::is_public_path(const std::string& path) {
     return path == "/" || path == "/ui" || path.rfind("/ui/", 0) == 0;
 }
 
 void Console::register_routes(httplib::Server& s) {
-    if (!cfg_.console.enabled) return;
+    if (!startup_.console.enabled) return;
     s.Get("/", [](const httplib::Request&, httplib::Response& res) { res.set_redirect("/ui/"); });
     s.Get("/ui", [](const httplib::Request&, httplib::Response& res) { res.set_redirect("/ui/"); });
     s.Get(R"(/ui/(.*))", [](const httplib::Request& req, httplib::Response& res) {
@@ -134,9 +136,14 @@ void Console::register_routes(httplib::Server& s) {
     s.Get("/console/info", [this](auto& q, auto& r) { on_info(q, r); });
     s.Post("/console/generate", [this](auto& q, auto& r) { on_generate(q, r); });
     s.Post("/console/exec", [this](auto& q, auto& r) { on_exec(q, r); });
+    s.Get("/console/config", [this](auto& q, auto& r) { on_config_get(q, r); });
+    s.Post("/console/config/check", [this](auto& q, auto& r) { on_config_post(q, r, false); });
+    s.Put("/console/config", [this](auto& q, auto& r) { on_config_post(q, r, true); });
 }
 
 void Console::on_info(const httplib::Request&, httplib::Response& res) {
+    auto cfgp = store_.current();
+    const ClusterConfig& cfg_ = *cfgp;
     json pools = json::array();
     for (const auto& p : cfg_.pools) pools.push_back(p.name);
     reply_json(res, 200,
@@ -162,6 +169,8 @@ void Console::on_generate(const httplib::Request& req, httplib::Response& res) {
     if (history.dump().size() > kMaxHistoryBytes)
         return reply_error(res, 400, "history is too large; start a new conversation", "invalid_request");
 
+    auto cfgp = store_.current();
+    const ClusterConfig& cfg_ = *cfgp;
     json node = nullptr;
     std::string node_id = body->is_object() && (*body)["node_id"].is_string() ? (*body)["node_id"].get<std::string>() : "";
     if (!node_id.empty()) {
@@ -224,6 +233,8 @@ void Console::on_generate(const httplib::Request& req, httplib::Response& res) {
 }
 
 void Console::on_exec(const httplib::Request& req, httplib::Response& res) {
+    auto cfgp = store_.current();
+    const ClusterConfig& cfg_ = *cfgp;
     if (!cfg_.console.allow_exec)
         return reply_error(res, 403, "code execution is disabled (set console.allow_exec: true in cluster.yaml)",
                            "forbidden");
@@ -252,7 +263,7 @@ void Console::on_exec(const httplib::Request& req, httplib::Response& res) {
     log::info("console: exec {} on {} ({} bytes, timeout {} s) requested by {}", language, node_id, code.size(), timeout,
               req.remote_addr);
     json agent_body{{"language", language}, {"code", code}, {"timeout_s", timeout}};
-    auto r = http_call("POST", agent_url, "/exec", cfg_.cluster_token, agent_body, timeout + kExecOverheadS);
+    auto r = http_call("POST", agent_url, "/exec", startup_.cluster_token, agent_body, timeout + kExecOverheadS);
     if (r.status == 0) return reply_error(res, 502, "agent on " + node_id + " unreachable: " + r.error, "upstream");
     if (!r.ok) {
         std::string msg = r.body.is_object() && r.body.contains("error") && r.body["error"].is_object()
@@ -264,6 +275,28 @@ void Console::on_exec(const httplib::Request& req, httplib::Response& res) {
     out["node_id"] = node_id;
     log::info("console: exec {} on {} finished: exit {}{}", language, node_id, out.value("exit_code", json()).dump(),
               out.value("timed_out", false) ? " (timed out)" : "");
+    reply_json(res, 200, out);
+}
+
+void Console::on_config_get(const httplib::Request&, httplib::Response& res) { reply_json(res, 200, store_.describe()); }
+
+// Body: {"yaml": "<cluster.yaml text>"} or {"config": {<cluster.yaml keys as JSON>}}.
+void Console::on_config_post(const httplib::Request& req, httplib::Response& res, bool save) {
+    auto body = parse_body(req, res);
+    if (!body) return;
+    ConfigCheck c;
+    if (body->is_object() && (*body)["yaml"].is_string()) c = store_.check_yaml((*body)["yaml"].get<std::string>());
+    else if (body->is_object() && body->contains("config")) c = store_.check_json((*body)["config"]);
+    else return reply_error(res, 400, "send {\"yaml\": \"...\"} or {\"config\": {...}}", "invalid_request");
+    if (!c.ok) return reply_json(res, 400, c.to_json());
+    if (save) {
+        log::info("console: config save requested by {}", req.remote_addr);
+        c = store_.save(std::move(c));
+        if (!c.ok) return reply_json(res, 500, c.to_json());
+    }
+    json out = c.to_json();
+    out["saved"] = save;
+    out["path"] = store_.describe()["path"];
     reply_json(res, 200, out);
 }
 

@@ -1,10 +1,12 @@
 #include "common/sysinfo.hpp"
 
+#include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <sys/sysctl.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include <cstring>
 #include <format>
 #include <string>
 
@@ -66,6 +68,17 @@ std::string os_string() {
     uname(&u);
     std::string ver = sysctl_string("kern.osproductversion");
     return std::format("macOS-{}-{}", ver.empty() ? u.release : ver, u.machine);
+}
+
+std::filesystem::path executable_path() {
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) != 0) return {};
+    buf.resize(std::strlen(buf.c_str()));
+    std::error_code ec;
+    auto p = std::filesystem::weakly_canonical(buf, ec);
+    return ec ? std::filesystem::path(buf) : p;
 }
 
 std::string cpu_model() { return sysctl_string("machdep.cpu.brand_string"); }

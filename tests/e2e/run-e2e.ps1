@@ -191,6 +191,21 @@ spares: 1
     Check ((Call POST "$coord/console/exec" @{ node_id = 'node-a'; language = 'cobol'; code = 'x' } $T).Status -eq 400) 'exec with an unavailable language -> 400'
     Check ((Call POST 'http://127.0.0.1:18202/exec' @{ language = $lang; code = $code } $T).Status -eq 403) 'agent /exec is off without --allow-exec'
 
+    # --- console configuration editor
+    $cf = Call GET "$coord/console/config" $null $T
+    Check ($cf.Status -eq 200 -and $cf.Json.file_exists -and $cf.Json.path -like '*cluster.yaml' -and $null -eq $cf.Json.config.cluster_token) 'GET /console/config (token not exposed in the form data)'
+    Check ((Call GET "$coord/console/config").Status -eq 401) 'config API requires X-Cluster-Token'
+    $bad = Call POST "$coord/console/config/check" @{ yaml = "pools: [{name: x}]" } $T
+    Check ($bad.Status -eq 400 -and $bad.Json.error) 'invalid config is rejected with an error message'
+    $form = $cf.Json.config
+    $form.console.max_tokens = 777
+    $form.router.max_queue = 5
+    $sv = Call PUT "$coord/console/config" @{ config = $form } $T
+    Check ($sv.Status -eq 200 -and @($sv.Json.live) -contains 'console.max_tokens' -and @($sv.Json.restart) -contains 'router.max_queue') 'PUT /console/config saves; reports live vs restart changes'
+    $cf2 = (Call GET "$coord/console/config" $null $T).Json
+    Check ($cf2.running.console.max_tokens -eq 777 -and $cf2.running.router.max_queue -eq 4 -and @($cf2.restart_pending) -contains 'router.max_queue') 'live setting applied, restart-only setting pending'
+    Check ((Get-Content (Join-Path $WorkDir 'cluster.yaml') -Raw) -match 'e2e-token' -and (Test-Path (Join-Path $WorkDir 'cluster.yaml.bak'))) 'saved file keeps the token and a .bak copy'
+
     # --- failover: kill the worker's agent (its rpc-server dies with it)
     $victim = $pair.workers[0]
     Log "killing agent $victim (worker of pair-0)"

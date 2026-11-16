@@ -2,6 +2,7 @@
 #pragma once
 
 #include <filesystem>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -22,12 +23,14 @@ struct PoolConfig {
     std::optional<int> parallel;  // slots per group; default router.slots_per_group
     std::optional<std::vector<double>> tensor_split;
     std::vector<std::string> extra_args;
+    bool operator==(const PoolConfig&) const = default;
 };
 
 struct PinnedEntry {
     std::string host;
     std::string role = "head";
     std::string pool;
+    bool operator==(const PinnedEntry&) const = default;
 };
 
 struct CoordinatorConfig {
@@ -36,6 +39,7 @@ struct CoordinatorConfig {
     double heartbeat_interval_s = 5;
     double node_timeout_s = 30;
     double group_start_timeout_s = 7200;
+    bool operator==(const CoordinatorConfig&) const = default;
 };
 
 struct RouterConfig {
@@ -47,11 +51,13 @@ struct RouterConfig {
     double request_timeout_s = 1800;
     int slots_per_group = 1;
     std::vector<std::string> api_keys;
+    bool operator==(const RouterConfig&) const = default;
 };
 
 struct LlamaCppConfig {
     bool rpc_cache = true;
     std::vector<std::string> extra_head_args;
+    bool operator==(const LlamaCppConfig&) const = default;
 };
 
 // Web console on the coordinator (architecture/03-coordinator.md §8, ADR-009).
@@ -63,6 +69,7 @@ struct ConsoleConfig {
     int max_tokens = 1024;
     double generate_timeout_s = 600;
     double exec_timeout_s = 60;   // default per-run timeout offered by the UI
+    bool operator==(const ConsoleConfig&) const = default;
 };
 
 struct ClusterConfig {
@@ -87,6 +94,16 @@ struct ClusterConfig {
 // `env_token` (normally QWEN_CLUSTER_TOKEN) overrides cluster_token when set.
 ClusterConfig parse_config(const std::string& yaml_text, const std::optional<std::string>& env_token);
 ClusterConfig load_config(const std::filesystem::path& path);
+
+// Built-in defaults, used when there is no cluster.yaml: no pools, token from `env_token` if set.
+ClusterConfig default_config(const std::optional<std::string>& env_token);
+
+// cluster.yaml text for a config (block style, no comments). parse_config(to_yaml(c)) == c.
+// The cluster_token written is c.cluster_token, so pass the file's own value, not the env one.
+std::string to_yaml(const ClusterConfig& c);
+
+// The config as JSON with the same keys as cluster.yaml. cluster_token is left out.
+nlohmann::json to_json(const ClusterConfig& c);
 
 // "a\\b.gguf" -> "a/b.gguf"; strips a leading "./".
 std::string normalize_model_path(std::string p);

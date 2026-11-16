@@ -35,6 +35,9 @@ public:
     nlohmann::json groups_json();
     // One node record as GET /nodes shows it, or nullopt for an unknown node.
     std::optional<nlohmann::json> node_record(const std::string& node_id);
+    // Takes pools, spares, pinned, llama_cpp and console from a saved config (03 §10.1). Running
+    // groups keep going; a redeploy applies pool changes to them.
+    void apply_layout(const ClusterConfig& c);
 
 private:
     struct ProcState {

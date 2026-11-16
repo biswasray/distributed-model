@@ -77,6 +77,12 @@ std::string os_string() {
     return std::format("Linux-{}-{}", u.release, u.machine);
 }
 
+std::filesystem::path executable_path() {
+    std::error_code ec;
+    auto p = std::filesystem::read_symlink("/proc/self/exe", ec);
+    return ec ? std::filesystem::path() : p;
+}
+
 std::string cpu_model() {
     std::ifstream f("/proc/cpuinfo");
     std::string line;

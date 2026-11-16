@@ -333,7 +333,7 @@ The script registers `C:\qwen-cluster\bin\xi.exe --coordinator ... --llama-dir C
 
 ## 8. Configuration
 
-All cluster layout lives in `cluster.yaml` on the coordinator machine.
+All cluster layout lives in `cluster.yaml` on the coordinator machine. You can edit it as a file, or on the web console's **Configuration** page (§12.1). XGI reads `./cluster.yaml`, then `cluster.yaml` next to `xgi.exe`. If there is neither, it starts with defaults and no pools, and the Configuration page creates the file when you save.
 
 > Full schema and validation rules: [architecture/05-protocols-and-data.md §5](architecture/05-protocols-and-data.md#5-configuration-schema).
 
@@ -561,9 +561,12 @@ Open `http://192.168.1.10:8100/ui/` on any machine on the LAN, and enter the clu
 - **Groups:** status, members and the last error.
 - **Code console:** pick a node and a language, then describe a task. The cluster's model (`console.model`) writes a program. Review and edit it, then click **Run on <node>** to see its output and exit code. **Write code myself** skips the model.
 
+- **Configuration** tab: edit `cluster.yaml` with a form (pools table, placement, console, llama.cpp, coordinator, router) or as YAML. **Validate** checks it, and **Save & apply** writes it (keeping `cluster.yaml.bak`). Pools, spares, llama.cpp and console settings take effect at once. Click **Redeploy** (on the Cluster tab, or the button shown after saving) to restart groups with a new layout. Ports, the token and router settings need an XGI restart; the page lists them.
+- **Groups** section: **Deploy**, **Redeploy** and **Undeploy** buttons.
+
 Running code is **off by default**. To turn it on:
 
-1. Set `console.allow_exec: true` in `cluster.yaml` and restart XGI.
+1. Tick **Allow running code on nodes** on the Configuration page and save (or set `console.allow_exec: true` in `cluster.yaml`). No restart is needed.
 2. On each node that may run code, re-register the agent with execution allowed, then restart it. This adds `--allow-exec --exec-dir C:\qwen-cluster\exec`:
    ```powershell
    .\scripts\install-xi-task.ps1 -Coordinator http://192.168.1.10:8100 -AllowExec

@@ -13,7 +13,9 @@
 #include "common/net.hpp"
 #include "common/platform.hpp"
 #include "common/shutdown.hpp"
+#include "common/sysinfo.hpp"
 #include "common/util.hpp"
+#include "xgi/config_store.hpp"
 #include "xgi/console.hpp"
 #include "xgi/coordinator.hpp"
 #include "xgi/router.hpp"
@@ -32,7 +34,8 @@ Usage:
   xgi --version
 
 Common options:
-  --config PATH       cluster.yaml (default ./cluster.yaml)
+  --config PATH       cluster.yaml (default: ./cluster.yaml, else cluster.yaml next to xgi,
+                      else built-in defaults; the web console can then create the file)
   --log-dir DIR       Log folder (default ./logs)
   --log-level LEVEL   debug | info | warn | error (default info)
 
@@ -55,8 +58,12 @@ void configure_server(httplib::Server& s, size_t threads) {
     });
 }
 
-int check_config(const xgi::ClusterConfig& c) {
-    std::cout << "cluster.yaml OK\n";
+int check_config(const xgi::ClusterConfig& c, const xgi::ConfigLocation& where) {
+    if (where.found)
+        std::cout << "cluster.yaml OK (" << xgi::path_to_utf8(where.path) << ")\n";
+    else
+        std::cout << "no cluster.yaml found: using built-in defaults (no pools). Create "
+                  << xgi::path_to_utf8(where.path) << " or use the web console's Configuration page.\n";
     for (const auto& w : c.warnings) std::cout << "  warning: " << w << "\n";
     std::cout << std::format("  auth: cluster token {}, router api_keys {}\n", c.cluster_token.empty() ? "NOT SET" : "set",
                              c.router.api_keys.empty() ? "open" : std::to_string(c.router.api_keys.size()));
@@ -92,14 +99,18 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    // --config must exist; without it, look in the current folder, then next to xgi, then use defaults.
+    const auto exe = xgi::sysinfo::executable_path();
+    const auto where = xgi::locate_config(args.get("--config"), exe.empty() ? exe : exe.parent_path());
+    const auto env_token = xgi::get_env(xgi::kTokenEnv);
     xgi::ClusterConfig cfg;
     try {
-        cfg = xgi::load_config(xgi::path_from_utf8(args.get_or("--config", "cluster.yaml")));
+        cfg = where.found ? xgi::load_config(where.path) : xgi::default_config(env_token);
     } catch (const std::exception& e) {
         std::cerr << "xgi: " << e.what() << "\n";
         return 1;
     }
-    if (cmd == "check-config") return check_config(cfg);
+    if (cmd == "check-config") return check_config(cfg, where);
 
     const bool run_coord = cmd == "coordinator" || cmd == "serve";
     const bool run_router = cmd == "router" || cmd == "serve";
@@ -123,12 +134,19 @@ int main(int argc, char** argv) {
     xgi::log::init(log_name, xgi::path_from_utf8(args.get_or("--log-dir", "logs")),
                    xgi::log::parse_level(args.get_or("--log-level", "info")));
     xgi::ensure_sockets();
+    if (where.found)
+        xgi::log::info("config: {}", xgi::path_to_utf8(where.path));
+    else
+        xgi::log::warn("config: no cluster.yaml found; running with built-in defaults (no pools). "
+                       "Saving from the console's Configuration page creates {}",
+                       xgi::path_to_utf8(where.path));
     for (const auto& w : cfg.warnings) xgi::log::warn("config: {}", w);
     if (cfg.cluster_token.empty())
         xgi::log::warn("no cluster token set (QWEN_CLUSTER_TOKEN): control plane is UNAUTHENTICATED");
 
     std::unique_ptr<xgi::Coordinator> coordinator;
     std::unique_ptr<xgi::Console> console;
+    xgi::ConfigStore store(cfg, where, env_token);
     std::unique_ptr<xgi::Router> router;
     httplib::Server coord_srv, router_srv;
 
@@ -144,7 +162,8 @@ int main(int argc, char** argv) {
                                                                          : httplib::Server::HandlerResponse::Handled;
         });
         coordinator->register_routes(coord_srv);
-        console = std::make_unique<xgi::Console>(cfg, *coordinator);
+        store.on_change([&coordinator](const xgi::ClusterConfig& c) { coordinator->apply_layout(c); });
+        console = std::make_unique<xgi::Console>(cfg, store, *coordinator);
         console->register_routes(coord_srv);
         if (!coord_srv.bind_to_port(cfg.coordinator.host, cfg.coordinator.port)) {
             xgi::log::error("coordinator: cannot listen on {}:{}", cfg.coordinator.host, cfg.coordinator.port);

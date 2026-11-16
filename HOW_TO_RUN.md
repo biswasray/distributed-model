@@ -81,7 +81,11 @@ cmake --build build/mingw           # -> build/mingw/xgi.exe, xi.exe (static, no
 | `release` (Ninja) | `build/release/xgi`, `build/release/xi` (`.exe` on Windows) | `build/release/tests/` |
 | `vs` | `build\vs\Release\xgi.exe`, `xi.exe` | `build\vs\tests\Release\` |
 
-The build also puts a starter `cluster.yaml` (a copy of `examples/cluster.yaml`) next to the executables, but only if there isn't one yet, so your edits survive rebuilds. To get a fresh copy, delete it and build again. `xgi` reads `./cluster.yaml` from the **current directory**, so run it from that folder or pass `--config`.
+Each of `xgi` and `xi` is **one self-contained executable**. The static libraries the build makes on the way (`xgi_common`, `xgi_lib`, `xi_lib`, `yaml-cpp`) go to `build/<preset>/lib/` and aren't needed at run time. To deploy, copy just the executable.
+
+The build also puts a starter `cluster.yaml` (a copy of `examples/cluster.yaml`) next to the executables, but only if there isn't one yet, so your edits survive rebuilds. To get a fresh copy, delete it and build again.
+
+Without `--config`, `xgi` reads `./cluster.yaml`, then `cluster.yaml` next to `xgi`. If neither exists, it starts with built-in defaults and no pools. Open `http://127.0.0.1:8100/ui/#config` to set it up; saving creates `cluster.yaml` next to `xgi`.
 
 The C++ runtime is linked statically where the toolchain allows it (MSVC `/MT`, GCC `-static-libstdc++`, MinGW `-static`), so nodes don't need a runtime installed. Turn this off with `-DXGI_STATIC_RUNTIME=OFF`.
 

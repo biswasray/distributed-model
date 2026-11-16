@@ -231,6 +231,16 @@ std::optional<json> Coordinator::node_record(const std::string& node_id) {
     return node_json_locked(it->second);
 }
 
+void Coordinator::apply_layout(const ClusterConfig& c) {
+    std::lock_guard lk(mu_);
+    cfg_.pools = c.pools;
+    cfg_.spares = c.spares;
+    cfg_.pinned = c.pinned;
+    cfg_.llama_cpp = c.llama_cpp;
+    cfg_.console = c.console;
+    log::info("config applied: {} pool(s), spares {}; redeploy to change running groups", cfg_.pools.size(), cfg_.spares);
+}
+
 json Coordinator::groups_json() {
     std::lock_guard lk(mu_);
     json out = json::array();
@@ -478,6 +488,7 @@ void Coordinator::start_sequence(const std::string& gid, std::uint64_t gen, Stop
     std::vector<Endpoint> workers;
     Endpoint head;
     PoolConfig pool;
+    LlamaCppConfig llama;  // copied under the lock: a config save can replace it (apply_layout)
     std::string head_url;
     int slots = 1;
     {
@@ -487,6 +498,7 @@ void Coordinator::start_sequence(const std::string& gid, std::uint64_t gen, Stop
         const PoolConfig* p = cfg_.find_pool(g.pool);
         if (!p || g.head.empty()) return;
         pool = *p;
+        llama = cfg_.llama_cpp;
         g.status = "starting";
         g.started_at = wall_now();
         g.healthy_at.reset();
@@ -501,7 +513,7 @@ void Coordinator::start_sequence(const std::string& gid, std::uint64_t gen, Stop
 
     // 1-2. Start every worker's rpc-server in parallel.
     std::vector<std::future<HttpResult>> fs;
-    json rpc_body{{"threads", nullptr}, {"cache", cfg_.llama_cpp.rpc_cache}};
+    json rpc_body{{"threads", nullptr}, {"cache", llama.rpc_cache}};
     for (const auto& w : workers)
         fs.push_back(std::async(std::launch::async, [this, w, rpc_body] {
             return http_call("POST", w.agent_url(), "/rpc/start", cfg_.cluster_token, rpc_body, kAgentStartTimeoutS);
@@ -531,7 +543,7 @@ void Coordinator::start_sequence(const std::string& gid, std::uint64_t gen, Stop
     std::vector<std::string> endpoints;
     for (const auto& w : workers) endpoints.push_back(std::format("{}:{}", w.ip, w.rpc_port));
     std::vector<std::string> extra = pool.extra_args;
-    extra.insert(extra.end(), cfg_.llama_cpp.extra_head_args.begin(), cfg_.llama_cpp.extra_head_args.end());
+    extra.insert(extra.end(), llama.extra_head_args.begin(), llama.extra_head_args.end());
     json head_body{{"model_file", pool.model_file},
                    {"rpc_endpoints", endpoints},
                    {"context", pool.context},

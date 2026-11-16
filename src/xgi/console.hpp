@@ -16,10 +16,13 @@
 namespace xgi {
 
 class Coordinator;
+class ConfigStore;
 
 class Console {
 public:
-    Console(const ClusterConfig& cfg, Coordinator& coordinator);
+    // `startup` holds the settings fixed for this process (token, console.enabled);
+    // everything else is read from `store`, which a config save can change.
+    Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& coordinator);
     void register_routes(httplib::Server& server);
 
     // Paths served without X-Cluster-Token: "/" and the static files under /ui/.
@@ -29,8 +32,11 @@ private:
     void on_info(const httplib::Request&, httplib::Response&);
     void on_generate(const httplib::Request&, httplib::Response&);
     void on_exec(const httplib::Request&, httplib::Response&);
+    void on_config_get(const httplib::Request&, httplib::Response&);
+    void on_config_post(const httplib::Request&, httplib::Response&, bool save);
 
-    const ClusterConfig& cfg_;
+    const ClusterConfig& startup_;
+    ConfigStore& store_;
     Coordinator& coord_;
 };
 

@@ -24,6 +24,11 @@ if(XGI_STATIC_RUNTIME AND MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+# xgi and xi are each one self-contained executable: the static libraries below (xgi_common, xi_lib,
+# xgi_lib, yaml-cpp) are build intermediates linked into them, so keep them out of the folder the
+# executables land in.
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+
 find_package(Threads REQUIRED)
 include(cmake/Dependencies.cmake)
 
@@ -109,6 +114,7 @@ add_custom_command(
     VERBATIM)
 
 add_library(xgi_lib STATIC
+    src/xgi/config_store.cpp
     src/xgi/console.cpp
     "${XGI_UI_CPP}"
     src/xgi/coordinator.cpp

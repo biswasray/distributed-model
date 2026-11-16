@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 namespace xgi::sysinfo {
@@ -16,5 +17,7 @@ std::string hostname();
 std::string os_string();
 // CPU brand string, e.g. "Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz"; empty if unknown.
 std::string cpu_model();
+// Full path of the running executable; empty if unknown.
+std::filesystem::path executable_path();
 
 }  // namespace xgi::sysinfo

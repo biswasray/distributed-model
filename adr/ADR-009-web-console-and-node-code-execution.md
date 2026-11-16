@@ -17,7 +17,8 @@ We will add a **web console** to XGI and an **opt-in code runner** to XI:
 2. XI detects the language runtimes on its `PATH` at startup (for example Python, Node.js, PowerShell, cmd, Bash, Java, Go, C/C++ and Rust). It reports them in its registration as `runtimes`, along with `arch`, `cpu_model`, `disk_free` and `binaries`.
 3. `POST /console/generate` sends the prompt to the router's `/v1/chat/completions`, using pool `console.model`. Code is generated **on the cluster** and is never sent outside the LAN.
 4. `POST /console/exec` forwards reviewed code to the node agent's new `POST /exec`. That endpoint runs it with a detected runtime in `--exec-dir`, with a timeout, captured output, and at most 2 concurrent jobs. On Windows the job runs in a kill-on-close job object, and on POSIX in its own process group.
-5. Execution is **off by default, and needs two opt-ins**: `console.allow_exec: true` in `cluster.yaml` **and** `xi --allow-exec` on each node. The UI never runs generated code automatically. The operator reviews and edits it, then clicks Run.
+5. The console has a **Configuration** page that validates and saves `cluster.yaml` and applies pools, spares, pinned, llama.cpp and console settings without a restart. Ports, the token and router settings apply on the next start. Without a `cluster.yaml` (none given, none in the current folder or next to `xgi`), XGI starts with built-in defaults and no pools, so a fresh install can be configured from the browser.
+6. Execution is **off by default, and needs two opt-ins**: `console.allow_exec: true` in `cluster.yaml` **and** `xi --allow-exec` on each node. The UI never runs generated code automatically. The operator reviews and edits it, then clicks Run.
 
 ## Alternatives considered
 
@@ -27,6 +28,7 @@ We will add a **web console** to XGI and an **opt-in code runner** to XI:
 | Execution on by default | Turns every token leak into remote code execution on 50 PCs. Opt-in on both sides limits the blast radius to nodes the operator chose. |
 | Auto-run generated code | LLM output can be wrong or destructive. A human review step is cheap. |
 | Sandbox (containers, WSL, AppContainer) | Not available on every Windows node. Not portable to Linux and macOS ([ADR-008](ADR-008-cross-platform-build.md)). Listed as follow-up. |
+| Restart XGI to apply every config change | A restart drops the coordinator's in-memory state ([ADR-006](ADR-006-in-memory-coordinator-state.md)) and needs a redeploy. Applying the layout sections live avoids that. Ports and the token stay restart-only because they are bound into sockets and agents. |
 | Agent pulls jobs from the coordinator | Adds a job queue and state to the in-memory coordinator ([ADR-006](ADR-006-in-memory-coordinator-state.md)). A direct, synchronous call matches the existing start/stop calls. |
 
 ## Consequences

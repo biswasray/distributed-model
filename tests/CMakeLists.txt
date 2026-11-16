@@ -2,6 +2,7 @@ add_executable(xgi_tests
     unit/test_main.cpp
     unit/test_commands.cpp
     unit/test_config.cpp
+    unit/test_config_store.cpp
     unit/test_console.cpp
     unit/test_placement.cpp
     unit/test_runtimes.cpp
