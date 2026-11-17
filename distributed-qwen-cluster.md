@@ -595,7 +595,9 @@ Each node has its own page at `http://<node-ip>:8200/ui/` (on the node itself, `
 
 ### 12.3 Downloading models onto nodes
 
-The agents download GGUF files from **Hugging Face** model repos or **GitHub releases** into their models folder ([ADR-011](adr/ADR-011-model-downloads-on-nodes.md)). They use `curl`, which Windows 10 1803+ already includes, and need HTTPS access to `huggingface.co` or `github.com`. XGI only passes the requests on.
+The agents download GGUF files from **Hugging Face** model repos or **GitHub releases** into their models folder ([ADR-011](adr/ADR-011-model-downloads-on-nodes.md)). They use `curl`, which Windows 10 1803+ already includes, and need HTTPS access to `huggingface.co` or `github.com`.
+
+XGI can also download onto **its own machine**, even with no agents running: pick **XGI server** as the target (CLI: `--node @xgi`). Files go to `console.models_dir` in `cluster.yaml` (default `models` next to where `xgi` runs; changeable on the Configuration page). Copy them to the heads from there, or run an agent on that machine with the same models folder.
 
 **In the web console** (`http://192.168.1.10:8100/ui/#models`):
 
@@ -651,7 +653,7 @@ Stop-ScheduledTask -TaskName QwenNodeAgent; Start-ScheduledTask -TaskName QwenNo
 | Group repeatedly marked degraded | A node is sleeping or roaming between access points | Turn off sleep and hibernation, set the Wi-Fi adapter to "maximum performance", and fix the IP |
 | Strange errors after update | Mixed llama.cpp versions | Use the same version everywhere |
 | Router returns 503 | No healthy groups in the pool | Check `GET /groups` and the head node logs |
-| Models tab: "no node can download" | `curl` not on the agent's `PATH` | Windows 10 1803+ has `C:\Windows\System32\curl.exe`. On Linux, install `curl` and restart the agent. |
+| Models tab: "Nothing can download" | `curl` not on the `PATH` of XGI or the agents | Windows 10 1803+ has `C:\Windows\System32\curl.exe`. On Linux, install `curl` and restart the agent. |
 | Download fails with "not found … private or gated" | Wrong repo or file name, or the repo needs a token | Check the name on the hub's website. For gated models, accept the licence there and set `HF_TOKEN` on the node (§12.3). |
 | Download fails with "Could not resolve host" or keeps retrying | The node has no internet access, or a proxy is needed | Test on the node with `curl.exe -I https://huggingface.co`. Set `HTTPS_PROXY` for the agent if your network uses a proxy, or copy the file by hand. |
 | Download fails: "already exists with a different size" | A different or incomplete file has the same name | Delete or rename the old file in the models folder (stop any group using it first), then **Retry**. |

@@ -114,8 +114,12 @@ Served on the coordinator port when `console.enabled` is true. `GET /` redirects
 
 ```json
 {"version": "0.2.0", "allow_exec": false, "model": "qwen3-30b-a3b", "pools": ["qwen3-30b-a3b"],
- "router_url": "http://127.0.0.1:8000", "exec_timeout_s": 60, "node_timeout_s": 30}
+ "router_url": "http://127.0.0.1:8000", "exec_timeout_s": 60, "node_timeout_s": 30,
+ "local_downloads": {"node_id": "@xgi", "available": true, "tool": "curl 8.13.0 ...", "models_dir": "C:\\qwen-cluster\\models",
+                     "disk_free": 214748364800, "models": ["qwen2.5-7b-instruct-q4_k_m.gguf"]}}
 ```
+
+`local_downloads` describes downloads onto the XGI machine itself (see "Model downloads" below).
 
 #### `POST /console/generate`
 
@@ -191,6 +195,8 @@ Response `200`:
 
 The console's **Models** tab and `xgi download` use these. They forward to the agents' download API (§3, "Model downloads") and need `X-Cluster-Token`. Like the rest of `/console/*`, they exist only while `console.enabled` is true.
 
+The reserved node id **`@xgi`** means the XGI machine itself: XGI runs the same download manager as an agent (with its own `curl`), saving into `console.models_dir`. It works with no agents registered. Encode it as `%40xgi` in a URL path or query.
+
 #### `GET /console/hub/files?node_id=&source=&repo=&ref=&all=`
 
 Asks the agent on `node_id` to list a repository (so it also shows whether that node can reach the hub). `source` is `huggingface` (or `hf`) or `github` (or `gh`), `repo` is `owner/name`, `ref` is a branch or commit for Hugging Face (default `main`) or a release tag for GitHub (default `latest`). Only `.gguf` files are listed unless `all=true`. The response is the agent's `GET /hub/files` body plus `node_id`.
@@ -202,7 +208,7 @@ Asks the agent on `node_id` to list a repository (so it also shows whether that 
  "errors": [{"node_id": "LAB-PC-12", "error": "Connection timed out"}]}
 ```
 
-The jobs of every alive node that can download (or of one node), newest first. The coordinator asks the agents in parallel (4 s timeout each); a node that can't be read is listed in `errors`.
+The jobs of the XGI machine (`node_id: "@xgi"`) and of every alive node that can download (or of one node), newest first. The response also has `local`, the same object as `local_downloads` in `/console/info`. The coordinator asks the agents in parallel (4 s timeout each); a node that can't be read is listed in `errors`.
 
 #### `POST /console/downloads`
 
@@ -459,6 +465,7 @@ console:                     # web console at http://<coordinator>:8100/ui/ (ADR
   max_tokens: 1024
   generate_timeout_s: 600
   exec_timeout_s: 60         # default run timeout offered by the UI
+  models_dir: models         # where downloads onto the XGI machine go (node "@xgi"); relative = XGI's working folder
 
 pools:                       # filled in this order
   - name: qwen3-30b-a3b      # = the client "model" field

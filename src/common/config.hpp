@@ -69,6 +69,7 @@ struct ConsoleConfig {
     int max_tokens = 1024;
     double generate_timeout_s = 600;
     double exec_timeout_s = 60;   // default per-run timeout offered by the UI
+    std::string models_dir = "models";  // where XGI's own model downloads go (ADR-011); relative = working dir
     bool operator==(const ConsoleConfig&) const = default;
 };
 

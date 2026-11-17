@@ -7,10 +7,13 @@
 #include "common/http_util.hpp"
 #include "common/hub.hpp"
 #include "common/log.hpp"
+#include "common/platform.hpp"
 #include "common/util.hpp"
 #include "xgi/config_store.hpp"
 #include "xgi/coordinator.hpp"
 #include "xgi/ui_assets.hpp"
+#include "xi/commands.hpp"
+#include "xi/downloads.hpp"
 
 namespace xgi {
 
@@ -127,8 +130,36 @@ std::string mime_type(std::string_view path) {
 
 // ------------------------------------------------------------------------------------------ routes
 
-Console::Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& coordinator)
-    : startup_(startup), store_(store), coord_(coordinator) {}
+Console::Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& coordinator, std::filesystem::path log_dir)
+    : startup_(startup), store_(store), coord_(coordinator) {
+    if (!startup_.console.enabled) return;
+    local_ = std::make_unique<xi::Downloads>(
+        [this, log_dir] {
+            return xi::Downloads::Paths{path_from_utf8(store_.current()->console.models_dir), log_dir};
+        },
+        nullptr);
+}
+
+Console::~Console() {
+    if (local_) local_->shutdown();
+}
+
+json Console::local_info() {
+    const std::filesystem::path dir = path_from_utf8(store_.current()->console.models_dir);
+    std::error_code ec;
+    auto abs = std::filesystem::absolute(dir, ec);
+    std::filesystem::path probe = abs;  // free space of the folder, or of the nearest existing parent
+    while (!probe.empty() && !std::filesystem::exists(probe, ec) && probe.has_parent_path() && probe.parent_path() != probe)
+        probe = probe.parent_path();
+    auto space = std::filesystem::space(probe, ec);
+    json tool = local_ ? local_->tool_json() : json{{"available", false}, {"tool", nullptr}};
+    return json{{"node_id", kLocalNode},
+                {"available", tool["available"]},
+                {"tool", tool["tool"]},
+                {"models_dir", path_to_utf8(abs)},
+                {"disk_free", ec ? json(nullptr) : json(space.available)},
+                {"models", xi::scan_models(dir)}};
+}
 
 bool Console::is_public_path(const std::string& path) {
     return path == "/" || path == "/ui" || path.rfind("/ui/", 0) == 0;
@@ -173,6 +204,7 @@ void Console::on_info(const httplib::Request&, httplib::Response& res) {
                     {"pools", pools},
                     {"router_url", cfg_.console.router_url},
                     {"exec_timeout_s", cfg_.console.exec_timeout_s},
+                    {"local_downloads", local_info()},
                     {"node_timeout_s", cfg_.coordinator.node_timeout_s}});
 }
 
@@ -326,6 +358,19 @@ void Console::on_config_post(const httplib::Request& req, httplib::Response& res
 // that needs internet access), so this also checks that the node can reach the hub.
 void Console::on_hub_files(const httplib::Request& req, httplib::Response& res) {
     std::string node_id = req.get_param_value("node_id");
+    if (node_id == kLocalNode) {
+        try {
+            auto src = hub::parse_source(req.get_param_value("source"));
+            if (!src) return reply_error(res, 400, "source must be huggingface or github", "invalid_request");
+            std::string all = to_lower(req.get_param_value("all"));
+            json out = local_->hub_files(*src, req.get_param_value("repo"), req.get_param_value("ref"),
+                                         all == "true" || all == "1");
+            out["node_id"] = node_id;
+            return reply_json(res, 200, out);
+        } catch (const xi::DownloadError& e) {
+            return reply_error(res, e.status, e.what(), e.type);
+        }
+    }
     auto node = coord_.node_record(node_id);
     if (!node) return reply_error(res, 404, "unknown node " + node_id, "not_found");
     if (node->value("status", "") != "alive") return reply_error(res, 409, "node " + node_id + " is dead", "conflict");
@@ -344,11 +389,20 @@ void Console::on_hub_files(const httplib::Request& req, httplib::Response& res) 
 // GET /console/downloads[?node_id=] : every alive node's download jobs, each with its node_id.
 void Console::on_downloads_list(const httplib::Request& req, httplib::Response& res) {
     std::vector<json> nodes;
-    if (req.has_param("node_id")) {
+    const bool only_local = req.get_param_value("node_id") == kLocalNode;
+    json downloads = json::array(), errors = json::array();
+    if (!req.has_param("node_id") || only_local) {
+        const json local = local_->list();  // keep it alive while iterating (no temporary lifetime extension)
+        for (auto j : local["downloads"]) {
+            j["node_id"] = kLocalNode;
+            downloads.push_back(std::move(j));
+        }
+    }
+    if (req.has_param("node_id") && !only_local) {
         auto n = coord_.node_record(req.get_param_value("node_id"));
         if (!n) return reply_error(res, 404, "unknown node " + req.get_param_value("node_id"), "not_found");
         nodes.push_back(*n);
-    } else {
+    } else if (!only_local) {
         for (const auto& n : coord_.nodes_json()) nodes.push_back(n);
     }
     std::vector<std::pair<std::string, std::future<HttpResult>>> calls;
@@ -360,7 +414,6 @@ void Console::on_downloads_list(const httplib::Request& req, httplib::Response& 
                                return http_call("GET", url, "/downloads", token, nullptr, 4);
                            }));
     }
-    json downloads = json::array(), errors = json::array();
     for (auto& [id, f] : calls) {
         HttpResult r = f.get();
         if (!r.ok) {
@@ -377,7 +430,7 @@ void Console::on_downloads_list(const httplib::Request& req, httplib::Response& 
     std::sort(downloads.begin(), downloads.end(), [](const json& a, const json& b) {
         return a.value("created_at", 0.0) > b.value("created_at", 0.0);
     });
-    reply_json(res, 200, json{{"downloads", downloads}, {"errors", errors}});
+    reply_json(res, 200, json{{"downloads", downloads}, {"errors", errors}, {"local", local_info()}});
 }
 
 // POST /console/downloads {"node_ids": [...], "source", "repo", "ref", "files", "dest_dir"}
@@ -400,6 +453,18 @@ void Console::on_downloads_start(const httplib::Request& req, httplib::Response&
     json started = json::array(), errors = json::array();
     std::vector<std::pair<std::string, std::future<HttpResult>>> calls;
     for (const auto& id : ids) {
+        if (id == kLocalNode) {
+            try {
+                json j = local_->start(xi::DownloadRequest::from_json(agent_body));
+                j["node_id"] = id;
+                started.push_back(j);
+            } catch (const xi::DownloadError& e) {
+                errors.push_back({{"node_id", id}, {"code", e.status}, {"error", e.what()}});
+            } catch (const std::invalid_argument& e) {
+                errors.push_back({{"node_id", id}, {"code", 400}, {"error", e.what()}});
+            }
+            continue;
+        }
         auto n = coord_.node_record(id);
         if (!n) {
             errors.push_back({{"node_id", id}, {"code", 404}, {"error", "unknown node"}});
@@ -439,6 +504,18 @@ void Console::on_downloads_start(const httplib::Request& req, httplib::Response&
 // POST /console/downloads/{node_id}/{id}/(pause|resume|cancel), DELETE /console/downloads/{node_id}/{id}
 void Console::on_download_action(const httplib::Request& req, httplib::Response& res, const std::string& action) {
     std::string node_id = req.matches[1], id = req.matches[2];
+    if (node_id == kLocalNode) {
+        try {
+            json out = json{{"ok", true}};
+            if (action == "remove") local_->remove(id);
+            else out = action == "pause" ? local_->pause(id) : action == "resume" ? local_->resume(id) : local_->cancel(id);
+            out["node_id"] = node_id;
+            log::info("console: download {} on this server: {} (by {})", id, action, req.remote_addr);
+            return reply_json(res, 200, out);
+        } catch (const xi::DownloadError& e) {
+            return reply_error(res, e.status, e.what(), e.type);
+        }
+    }
     auto node = coord_.node_record(node_id);
     if (!node) return reply_error(res, 404, "unknown node " + node_id, "not_found");
     if (node->value("status", "") != "alive") return reply_error(res, 409, "node " + node_id + " is dead", "conflict");

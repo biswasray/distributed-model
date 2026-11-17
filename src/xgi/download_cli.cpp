@@ -43,6 +43,9 @@ Usage:
   xgi download cancel <node>/<id>...            Stop and delete the partial file
   xgi download remove <node>/<id>...            Drop a finished download from the list
 
+Node "@xgi" is the XGI server itself: files go to its console.models_dir (default ./models), so
+models can be downloaded with no agents running, e.g.  xgi download start <url> --node @xgi
+
 Connection (all commands):
   --coordinator URL   default: http://127.0.0.1:<coordinator.port from cluster.yaml>
   --token T           default: env QWEN_CLUSTER_TOKEN, then cluster_token in cluster.yaml

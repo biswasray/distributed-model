@@ -168,7 +168,8 @@ int main(int argc, char** argv) {
         });
         coordinator->register_routes(coord_srv);
         store.on_change([&coordinator](const xgi::ClusterConfig& c) { coordinator->apply_layout(c); });
-        console = std::make_unique<xgi::Console>(cfg, store, *coordinator);
+        console = std::make_unique<xgi::Console>(cfg, store, *coordinator,
+                                                 xgi::path_from_utf8(args.get_or("--log-dir", "logs")));
         console->register_routes(coord_srv);
         if (!coord_srv.bind_to_port(cfg.coordinator.host, cfg.coordinator.port)) {
             xgi::log::error("coordinator: cannot listen on {}:{}", cfg.coordinator.host, cfg.coordinator.port);

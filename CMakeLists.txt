@@ -145,7 +145,9 @@ add_library(xgi_lib STATIC
     src/xgi/router.cpp
     src/xgi/scheduling.cpp
 )
-target_link_libraries(xgi_lib PUBLIC xgi_common)
+# XGI reuses XI's download manager for downloads onto its own machine (ADR-011); only the objects
+# it needs are linked in, and xgi stays one executable.
+target_link_libraries(xgi_lib PUBLIC xgi_common xi_lib)
 
 add_executable(xgi src/xgi/main.cpp)
 target_link_libraries(xgi PRIVATE xgi_lib)

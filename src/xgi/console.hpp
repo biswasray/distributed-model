@@ -7,11 +7,17 @@
 
 #include <httplib.h>
 
+#include <filesystem>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 
 #include "common/config.hpp"
+
+namespace xi {
+class Downloads;
+}
 
 namespace xgi {
 
@@ -22,8 +28,13 @@ class Console {
 public:
     // `startup` holds the settings fixed for this process (token, console.enabled);
     // everything else is read from `store`, which a config save can change.
-    Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& coordinator);
+    Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& coordinator,
+            std::filesystem::path log_dir = "logs");
+    ~Console();
     void register_routes(httplib::Server& server);
+
+    // The node_id the console uses for downloads onto the XGI machine itself (into console.models_dir).
+    static constexpr const char* kLocalNode = "@xgi";
 
     // Paths served without X-Cluster-Token: "/" and the static files under /ui/.
     static bool is_public_path(const std::string& path);
@@ -39,10 +50,12 @@ private:
     void on_downloads_list(const httplib::Request&, httplib::Response&);
     void on_downloads_start(const httplib::Request&, httplib::Response&);
     void on_download_action(const httplib::Request&, httplib::Response&, const std::string& action);
+    nlohmann::json local_info();  // {"node_id", "available", "tool", "models_dir", "disk_free", "models"}
 
     const ClusterConfig& startup_;
     ConfigStore& store_;
     Coordinator& coord_;
+    std::unique_ptr<xi::Downloads> local_;  // downloads onto this machine
 };
 
 // --- pure helpers (unit-tested)

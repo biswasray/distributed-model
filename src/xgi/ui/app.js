@@ -148,6 +148,7 @@
       return;
     }
     state.info = info.json;
+    hub.local = state.info.local_downloads || null;
     $("version").textContent = "v" + state.info.version;
     $("target-timeout").value = Math.round(state.info.exec_timeout_s || 60);
     renderExecNotice();
@@ -697,6 +698,7 @@
       ["max_tokens", "Max tokens per answer", "int"],
       ["generate_timeout_s", "Generation timeout (s)", "num"],
       ["exec_timeout_s", "Default run timeout (s)", "num"],
+      ["models_dir", "XGI's models folder", "text", "Where models downloaded onto this server (Models tab, \"XGI server\") are saved. Relative paths are from XGI's working folder."],
       ["enabled", "Serve the web console", "bool", "Turning this off removes this page after the restart.", true],
     ] },
     { key: "llama_cpp", title: "llama.cpp", fields: [
@@ -958,15 +960,22 @@
       : "Qwen/Qwen2.5-7B-Instruct-GGUF  or a https://huggingface.co/… link";
   }
 
-  function downloadNodes() {
-    return state.nodes.filter((n) => n.status === "alive" && !(n.downloads && n.downloads.available === false));
+  const LOCAL = "@xgi";  // downloads onto the XGI server itself (console.models_dir)
+  function nodeLabel(id) { return id === LOCAL ? "XGI server" : id; }
+
+  // The XGI server first (when it has curl), then alive agents that can download.
+  function downloadNodes(withLocal = true) {
+    const out = [];
+    const l = hub.local;
+    if (withLocal && l && l.available) out.push({ node_id: LOCAL, status: "alive", local: true, disk_free: l.disk_free, models: l.models || [], models_dir: l.models_dir });
+    return out.concat(state.nodes.filter((n) => n.status === "alive" && !(n.downloads && n.downloads.available === false)));
   }
 
   function renderHubVia() {
     const sel = $("hub-via");
     const keep = sel.value;
     const nodes = downloadNodes();
-    sel.replaceChildren(...(nodes.length ? nodes.map((n) => h("option", { value: n.node_id, text: n.node_id }))
+    sel.replaceChildren(...(nodes.length ? nodes.map((n) => h("option", { value: n.node_id, text: nodeLabel(n.node_id) }))
       : [h("option", { value: "", text: "no node can download" })]));
     if (nodes.some((n) => n.node_id === keep)) sel.value = keep;
     sel.disabled = !nodes.length;
@@ -1011,8 +1020,8 @@
     }
     if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) return hubStatus("Enter the repository as owner/name.", "bad");
     const via = $("hub-via").value;
-    if (!via) return hubStatus("No alive node can download (XI needs curl). Start an agent first.", "bad");
-    hubStatus("Asking " + via + " for the file list…", "busy");
+    if (!via) return hubStatus("Nothing can download: XGI and the agents need curl on their PATH.", "bad");
+    hubStatus("Asking " + nodeLabel(via) + " for the file list…", "busy");
     $("hub-list").disabled = true;
     const q = new URLSearchParams({ node_id: via, source: hub.source, repo, ref, all: $("hub-all").checked ? "true" : "false" });
     const r = await api("GET", "/console/hub/files?" + q.toString());
@@ -1071,11 +1080,12 @@
       cb.checked = hub.targets.has(n.node_id);
       cb.addEventListener("change", () => { cb.checked ? hub.targets.add(n.node_id) : hub.targets.delete(n.node_id); renderHubTargets(); });
       return h("label", { class: "hub-node" + (cb.checked ? " sel" : "") }, cb,
-        h("span", { class: "hub-node-name", text: n.node_id }),
+        h("span", { class: "hub-node-name", title: n.local ? "Saved to " + (n.models_dir || "") : null, text: nodeLabel(n.node_id) }),
+        n.local ? h("span", { class: "badge accent", text: "this server" }) : null,
         n.role ? h("span", { class: "badge", text: n.role }) : null,
         has ? h("span", { class: "badge ok", title: "Already in its models folder", text: "has it" }) : null,
         h("span", { class: "muted" + (tight ? " bad-text" : ""), title: "Free disk space in the models folder", text: n.disk_free != null ? bytes(n.disk_free) + " free" : "" }));
-    }) : [h("p", { class: "muted", text: "No alive node can download (XI needs curl on PATH)." })]));
+    }) : [h("p", { class: "muted", text: "Nothing can download: XGI and the agents need curl on their PATH." })]));
     const k = hub.targets.size;
     $("hub-summary").textContent = sel.length ? `${sel.length} file${sel.length === 1 ? "" : "s"}, ${bytes(size)}` + (k ? ` → ${k} node${k === 1 ? "" : "s"}` : "")
       : "Select the files to download.";
@@ -1094,8 +1104,8 @@
     renderHubTargets();
     const started = (r.json && r.json.started) || [];
     const errors = (r.json && r.json.errors) || [];
-    if (!started.length) return hubStatus((errors.length ? errors.map((e) => e.node_id + ": " + e.error).join("; ") : r.error) || "Download failed.", "bad");
-    hubStatus(`Started on ${started.map((j) => j.node_id).join(", ")}` + (errors.length ? `. Failed on ${errors.map((e) => e.node_id + " (" + e.error + ")").join(", ")}` : "."), errors.length ? "warn" : "ok");
+    if (!started.length) return hubStatus((errors.length ? errors.map((e) => nodeLabel(e.node_id) + ": " + e.error).join("; ") : r.error) || "Download failed.", "bad");
+    hubStatus(`Started on ${started.map((j) => nodeLabel(j.node_id)).join(", ")}` + (errors.length ? `. Failed on ${errors.map((e) => nodeLabel(e.node_id) + " (" + e.error + ")").join(", ")}` : "."), errors.length ? "warn" : "ok");
     hub.jobs = started.concat(hub.jobs);
     renderDownloads();
     pollDownloads();
@@ -1139,7 +1149,7 @@
       if (["completed", "failed", "canceled", "paused"].includes(j.state)) actions.push(act("✕", "remove", "ghost", "Remove from the list"));
       return h("div", { class: "dl-item" },
         h("div", { class: "dl-head" },
-          h("span", { class: "dl-node", text: j.node_id }),
+          h("span", { class: "dl-node", text: nodeLabel(j.node_id) }),
           dlStateBadge(j.state),
           h("span", { class: "dl-file mono", title: files.map((f) => f.target).join("\n"), text: fileText }),
           ...actions),
@@ -1153,12 +1163,12 @@
   }
 
   async function downloadAction(j, action, btn) {
-    if (action === "cancel" && !confirm(`Cancel the download on ${j.node_id} and delete its partial file?`)) return;
+    if (action === "cancel" && !confirm(`Cancel the download on ${nodeLabel(j.node_id)} and delete its partial file?`)) return;
     if (btn) btn.disabled = true;
     const path = "/console/downloads/" + encodeURIComponent(j.node_id) + "/" + j.id + (action === "remove" ? "" : "/" + action);
     const r = await api(action === "remove" ? "DELETE" : "POST", path, action === "remove" ? undefined : {});
     if (r.status !== 200) {
-      $("dl-errors").replaceChildren(h("p", { class: "notice-inline", text: j.node_id + ": " + r.error }));
+      $("dl-errors").replaceChildren(h("p", { class: "notice-inline", text: nodeLabel(j.node_id) + ": " + r.error }));
       if (btn) btn.disabled = false;
     }
     pollDownloads();
@@ -1176,6 +1186,9 @@
     if (r.status === 401) return;  // the token dialog is open; start() polls again
     if (r.status === 200 && r.json) {
       hub.jobs = r.json.downloads || [];
+      const hadLocal = !!(hub.local && hub.local.available);
+      hub.local = r.json.local || hub.local;
+      if (!!(hub.local && hub.local.available) !== hadLocal || hub.listing) { renderHubVia(); renderHubTargets(); }
       const errs = r.json.errors || [];
       $("dl-errors").replaceChildren(...errs.map((e) => h("p", { class: "notice-inline", text: "Cannot read downloads on " + e.node_id + ": " + e.error })));
       renderDownloads();
@@ -1199,10 +1212,10 @@
     $("hub-all").addEventListener("change", () => { if (hub.listing) listHubFiles(); });
     $("hub-dest").addEventListener("input", renderHubTargets);
     $("hub-start").addEventListener("click", startDownload);
-    $("hub-pick-all").addEventListener("click", () => { for (const n of downloadNodes()) hub.targets.add(n.node_id); renderHubTargets(); });
+    $("hub-pick-all").addEventListener("click", () => { for (const n of downloadNodes(false)) hub.targets.add(n.node_id); renderHubTargets(); });
     $("hub-pick-none").addEventListener("click", () => { hub.targets.clear(); renderHubTargets(); });
     $("hub-pick-missing").addEventListener("click", () => {
-      hub.targets = new Set(downloadNodes().filter((n) => !nodeHasAll(n)).map((n) => n.node_id));
+      hub.targets = new Set(downloadNodes(false).filter((n) => !nodeHasAll(n)).map((n) => n.node_id));
       renderHubTargets();
     });
     $("dl-clear").addEventListener("click", clearFinished);

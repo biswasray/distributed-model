@@ -103,6 +103,7 @@ console:
   router_url: $router
   model: solo
   generate_timeout_s: 30
+  models_dir: '$WorkDir\xgi-models'
 pools:
   - name: pair
     model_file: mock.gguf
@@ -292,6 +293,23 @@ spares: 1
     Check ($LASTEXITCODE -eq 0 -and $cliList -match "node-c/$jc\s+completed") 'xgi download list shows the jobs'
     $cliFiles = (& $Xgi download files hf test/mock --node node-c --coordinator $coord --token $token 2>&1) -join "`n"
     Check ($LASTEXITCODE -eq 0 -and $cliFiles -match 'mock-a\.gguf') 'xgi download files lists the repo'
+
+    # --- downloads onto the XGI server itself (node "@xgi", into console.models_dir)
+    $ci = (Call GET "$coord/console/info" $null $T).Json
+    Check ($ci.local_downloads.available -eq $true -and $ci.local_downloads.models_dir -like '*xgi-models') 'console/info reports the XGI server''s download folder'
+    $lx = Call GET "$coord/console/hub/files?node_id=%40xgi&source=hf&repo=test/mock" $null $T
+    Check ($lx.Status -eq 200 -and @($lx.Json.files).Count -eq 4) 'XGI lists a hub repo itself (no agent needed)'
+    $sx = Call POST "$coord/console/downloads" @{ node_ids = @('@xgi'); source = 'hf'; repo = 'test/mock'; files = @('mock-a.gguf') } $T
+    $jx = $sx.Json.started[0].id
+    Check ($sx.Status -eq 200 -and $sx.Json.started[0].node_id -eq '@xgi') 'POST /console/downloads starts a download on the XGI server'
+    Check (WaitFor { $j = DlJob '%40xgi' $jx; $j.state -eq 'downloading' -and $j.done_bytes -gt 0 } 20 'xgi progress') 'XGI download reports progress'
+    Check ((Call POST "$coord/console/downloads/%40xgi/$jx/pause" @{} $T).Status -eq 200 -and (WaitFor { (DlJob '%40xgi' $jx).state -eq 'paused' } 10 'xgi paused')) 'XGI download pauses'
+    Check ((Call POST "$coord/console/downloads/%40xgi/$jx/resume" @{} $T).Status -eq 200 -and (WaitFor { (DlJob '%40xgi' $jx).state -eq 'completed' } 40 'xgi done')) 'XGI download resumes and completes'
+    Check ((Get-Item (Join-Path $WorkDir 'xgi-models\mock-a.gguf')).Length -eq 8000000) 'file saved in console.models_dir'
+    $all = Items (Call GET "$coord/console/downloads" $null $T).Json.downloads
+    Check (@($all | Where-Object { $_.node_id -eq '@xgi' }).Count -ge 1 -and @($all | Where-Object { $_.node_id -eq 'node-c' }).Count -ge 1) 'GET /console/downloads lists XGI and node downloads together'
+    $cliX = & $Xgi download start hf test/mock mock-c.gguf --node '@xgi' --coordinator $coord --token $token 2>&1
+    Check ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $WorkDir 'xgi-models\mock-c.gguf'))) "xgi download start --node @xgi downloads onto the XGI server: $(($cliX | Select-Object -Last 1))"
 
     # --- failover: kill the worker's agent (its rpc-server dies with it)
     $victim = $pair.workers[0]

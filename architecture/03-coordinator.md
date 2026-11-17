@@ -196,7 +196,7 @@ The console's **Configuration** tab (`/ui/#config`) edits `cluster.yaml` ([05 §
 
 ## 11. Model downloads
 
-[ADR-011](../adr/ADR-011-model-downloads-on-nodes.md). The agents do the downloading ([02 §11](02-node-agent.md#11-model-downloads)); the coordinator only forwards, so XGI needs no internet access. Schemas: [05 §2](05-protocols-and-data.md#model-downloads-adr-011).
+[ADR-011](../adr/ADR-011-model-downloads-on-nodes.md). The agents do the downloading ([02 §11](02-node-agent.md#11-model-downloads)); the coordinator forwards. XGI can also download onto **its own machine**: the console runs the same download manager in-process for the reserved node id `@xgi` (shown as *XGI server*), saving into `console.models_dir` (live setting, default `models`). This works with no agents at all; only this needs internet access on the XGI machine. Schemas: [05 §2](05-protocols-and-data.md#model-downloads-adr-011).
 
 - **Console, Models tab** (`/ui/#models`): pick Hugging Face or GitHub, enter `owner/repo` (or paste a file link, which fills in the repo, ref and file), and choose the node that looks it up. **List files** calls `GET /console/hub/files`. The operator ticks files (ticking one part of a split GGUF ticks all its parts) and target nodes. Each node shows its free disk space and *has it* when the files are already in its models folder; **Missing it** selects the alive nodes without them. **Download** calls `POST /console/downloads`.
 - **Downloads list:** polls `GET /console/downloads` every 1.5 s while the tab is open or a download is running (8 s otherwise; the tab shows the number running). Each job has a progress bar (an animated one while sizes are unknown), bytes, speed and time left, and **Pause**, **Resume**/**Retry**, **Cancel** and remove buttons.
@@ -211,4 +211,4 @@ xgi download list                                                               
 xgi download pause | resume | cancel | remove LAB-PC-07/1422550f
 ```
 
-`start` shows a progress line until the jobs finish (`--detach` returns at once); Ctrl+C pauses them. It finds the coordinator at `--coordinator`, else `http://127.0.0.1:<coordinator.port>` from `cluster.yaml`, and the token at `--token`, else `QWEN_CLUSTER_TOKEN`, else `cluster.yaml`. Exit codes: `0` all completed, `1` a download failed or was canceled, `2` usage error, `130` interrupted (paused).
+`--node @xgi` downloads onto the XGI machine. `start` shows a progress line until the jobs finish (`--detach` returns at once); Ctrl+C pauses them. It finds the coordinator at `--coordinator`, else `http://127.0.0.1:<coordinator.port>` from `cluster.yaml`, and the token at `--token`, else `QWEN_CLUSTER_TOKEN`, else `cluster.yaml`. Exit codes: `0` all completed, `1` a download failed or was canceled, `2` usage error, `130` interrupted (paused).

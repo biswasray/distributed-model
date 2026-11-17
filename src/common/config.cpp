@@ -124,7 +124,7 @@ ClusterConfig parse_config(const std::string& yaml_text, const std::optional<std
 
     if (auto n = root["console"]; n && n.IsMap()) {
         warn_unknown(n, {"enabled", "allow_exec", "router_url", "model", "max_tokens", "generate_timeout_s",
-                         "exec_timeout_s"},
+                         "exec_timeout_s", "models_dir"},
                      "console", c.warnings);
         auto& k = c.console;
         k.enabled = get(n, "enabled", k.enabled, "console");
@@ -134,6 +134,8 @@ ClusterConfig parse_config(const std::string& yaml_text, const std::optional<std
         k.max_tokens = get(n, "max_tokens", k.max_tokens, "console");
         k.generate_timeout_s = get(n, "generate_timeout_s", k.generate_timeout_s, "console");
         k.exec_timeout_s = get(n, "exec_timeout_s", k.exec_timeout_s, "console");
+        k.models_dir = get(n, "models_dir", k.models_dir, "console");
+        if (k.models_dir.empty()) throw ConfigError("console.models_dir must not be empty");
         if (k.max_tokens < 1) throw ConfigError("console.max_tokens must be >= 1");
         if (k.generate_timeout_s <= 0 || k.exec_timeout_s <= 0)
             throw ConfigError("console.generate_timeout_s and console.exec_timeout_s must be > 0");
@@ -265,6 +267,7 @@ std::string to_yaml(const ClusterConfig& c) {
     out << YAML::Key << "max_tokens" << YAML::Value << c.console.max_tokens;
     out << YAML::Key << "generate_timeout_s" << YAML::Value << c.console.generate_timeout_s;
     out << YAML::Key << "exec_timeout_s" << YAML::Value << c.console.exec_timeout_s;
+    out << YAML::Key << "models_dir" << YAML::Value << YAML::SingleQuoted << c.console.models_dir;
     out << YAML::EndMap;
 
     out << YAML::Key << "pools" << YAML::Value;
@@ -325,7 +328,7 @@ nlohmann::json to_json(const ClusterConfig& c) {
         {"llama_cpp", {{"rpc_cache", c.llama_cpp.rpc_cache}, {"extra_head_args", c.llama_cpp.extra_head_args}}},
         {"console", {{"enabled", n.enabled}, {"allow_exec", n.allow_exec}, {"router_url", n.router_url}, {"model", n.model},
                      {"max_tokens", n.max_tokens}, {"generate_timeout_s", n.generate_timeout_s},
-                     {"exec_timeout_s", n.exec_timeout_s}}},
+                     {"exec_timeout_s", n.exec_timeout_s}, {"models_dir", n.models_dir}}},
         {"pools", pools},
         {"spares", c.spares},
         {"pinned", pinned},

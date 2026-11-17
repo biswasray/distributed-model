@@ -15,6 +15,7 @@
 4. **Resumable by design.** A file downloads to `<target>.part` and is renamed when complete and the size matches the hub listing. Pause kills curl and keeps the `.part`; resume (or any later download of the same file, even after an agent restart) continues it with an HTTP Range request (`curl -C -`). Cancel deletes the `.part`. Transient failures retry up to 5 times with backoff. An existing file is never overwritten.
 5. **Tokens stay on the node.** Gated or private repos use `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) and `GITHUB_TOKEN` (or `GH_TOKEN`) from the agent's environment. They are passed to curl in a header file, not on its command line, and are never sent through XGI.
 6. **The coordinator learns about new files** because the agent re-registers after each completed file, so placement can use the node as a head at once.
+7. **XGI can download onto its own machine too** (node id `@xgi`, into `console.models_dir`), with the same download manager linked into `xgi`. This works before any agent is running, for example to stage files that are then copied to the heads by hand.
 
 ## Alternatives considered
 
@@ -30,6 +31,7 @@
 
 - ✅ Operators fetch a model onto one or many nodes from a browser or one command, watch progress, and pause, resume or cancel.
 - ✅ Interrupted downloads (Wi-Fi drop, agent restart, pause) continue where they stopped.
+- ✅ Models can be fetched onto the XGI machine with no agents running.
 - ❌ Nodes need outbound HTTPS to `huggingface.co` (and its CDN) or `github.com` / `api.github.com` (and `objects.githubusercontent.com`).
 - ❌ 50 nodes downloading the same 18 GB file at once share the site's internet link. Download to the heads only (the **Missing it** picker), a few at a time.
 - ❌ Integrity is checked by size only, not by the hub's SHA-256.
