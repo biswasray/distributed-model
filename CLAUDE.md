@@ -40,7 +40,9 @@ docs/
 ├── src/xgi/ui/                        ← console HTML/CSS/vanilla JS, embedded by cmake/EmbedAssets.cmake
 ├── tests/                             ← unit tests, mock llama.cpp binaries, mock-hub (HF/GitHub), e2e/run-e2e.ps1, e2e/smoke.sh
 ├── examples/cluster.yaml              ← example config (option D)
-└── scripts/                           ← install-xi-task.ps1 (Windows), install-xi-service.sh (systemd/launchd)
+├── scripts/                           ← install-xi-task.ps1 (Windows), install-xi-service.sh (systemd/launchd)
+├── website/                           ← MkDocs site for GitHub Pages (stage.py + mkdocs.yml); add new pages to its nav
+└── .github/workflows/docs.yml         ← builds the docs site on PRs, deploys it to Pages on push to main
 ```
 
 ## Sources of truth

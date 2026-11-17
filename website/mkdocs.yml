@@ -1,0 +1,101 @@
+# MkDocs config for the GitHub Pages site.
+# The pages are staged from the repo root by stage.py; see website/README.md.
+site_name: Qwen Cluster
+site_description: Run Qwen LLMs across ~50 CPU-only Windows PCs on a Wi-Fi LAN with llama.cpp RPC.
+site_url: https://biswasray.github.io/distributed-model/
+repo_url: https://github.com/biswasray/distributed-model
+repo_name: biswasray/distributed-model
+edit_uri: ""
+
+docs_dir: _staging
+site_dir: _site
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+validation:
+  omitted_files: warn
+  absolute_links: info
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Guides:
+      - How to run XGI and XI: HOW_TO_RUN.md
+      - Operator guide: distributed-qwen-cluster.md
+  - Architecture:
+      - architecture/01-system-overview.md
+      - architecture/02-node-agent.md
+      - architecture/03-coordinator.md
+      - architecture/04-router.md
+      - architecture/05-protocols-and-data.md
+      - architecture/06-security.md
+  - Decisions:
+      - adr/index.md
+      - adr/ADR-001-llama-cpp-as-inference-engine.md
+      - adr/ADR-002-pipeline-not-tensor-parallelism.md
+      - adr/ADR-003-moe-model-as-default-pool.md
+      - adr/ADR-004-shared-cluster-token.md
+      - adr/ADR-005-model-files-relative-to-models-dir.md
+      - adr/ADR-006-in-memory-coordinator-state.md
+      - adr/ADR-007-cpp-implementation-xgi-xi.md
+      - adr/ADR-008-cross-platform-build.md
+      - adr/ADR-009-web-console-and-node-code-execution.md
+      - adr/ADR-010-agent-web-page-and-runtime-settings.md
+      - adr/ADR-011-model-downloads-on-nodes.md
+  - Contributing:
+      - Working with Claude: CLAUDE.md
+      - Skills:
+          - skills/cluster-capacity-planning.md
+          - skills/add-model-pool.md
+          - skills/node-setup-runbook.md
+          - skills/cluster-troubleshooting.md
+          - skills/write-adr.md
