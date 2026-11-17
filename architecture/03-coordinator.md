@@ -160,6 +160,9 @@ A node that comes back after being marked dead gets `404` on its next heartbeat,
 | GET | `/console/config` | console | The config file and the running settings |
 | POST | `/console/config/check` | console | Validate a new config |
 | PUT | `/console/config` | console | Validate, save and apply a new config (§10.1) |
+| GET | `/console/hub/files` | console, CLI | List a Hugging Face repo or GitHub release, through a node (§11) |
+| GET / POST | `/console/downloads` | console, CLI | Every node's downloads · start one on one or more nodes (§11) |
+| POST / DELETE | `/console/downloads/{node_id}/{id}[/pause\|resume\|cancel]` | console, CLI | Control or remove one node's download (§11) |
 
 Every endpoint except `/health` and the console's static files requires `X-Cluster-Token`. Schemas are in [05-protocols-and-data.md](05-protocols-and-data.md#2-coordinator-api).
 
@@ -190,3 +193,22 @@ The console's **Configuration** tab (`/ui/#config`) edits `cluster.yaml` ([05 §
 - **YAML:** the file as text, saved byte-for-byte.
 - **Validate** runs the startup validation without saving. **Save & apply** writes the file atomically (keeping `cluster.yaml.bak`), then calls `Coordinator::apply_layout`, which replaces the pools, spares, pinned and llama.cpp settings under the state mutex. Lifecycle tasks copy the llama.cpp settings under the lock, so a save never changes a group's start half-way. Running groups keep their members and model until a redeploy. The page offers **Redeploy now** after a layout change.
 - The Cluster tab's Groups section has **Deploy**, **Redeploy** and **Undeploy** buttons (`POST /deploy`, `/deploy?force=true`, `/undeploy`).
+
+## 11. Model downloads
+
+[ADR-011](../adr/ADR-011-model-downloads-on-nodes.md). The agents do the downloading ([02 §11](02-node-agent.md#11-model-downloads)); the coordinator only forwards, so XGI needs no internet access. Schemas: [05 §2](05-protocols-and-data.md#model-downloads-adr-011).
+
+- **Console, Models tab** (`/ui/#models`): pick Hugging Face or GitHub, enter `owner/repo` (or paste a file link, which fills in the repo, ref and file), and choose the node that looks it up. **List files** calls `GET /console/hub/files`. The operator ticks files (ticking one part of a split GGUF ticks all its parts) and target nodes. Each node shows its free disk space and *has it* when the files are already in its models folder; **Missing it** selects the alive nodes without them. **Download** calls `POST /console/downloads`.
+- **Downloads list:** polls `GET /console/downloads` every 1.5 s while the tab is open or a download is running (8 s otherwise; the tab shows the number running). Each job has a progress bar (an animated one while sizes are unknown), bytes, speed and time left, and **Pause**, **Resume**/**Retry**, **Cancel** and remove buttons.
+- **`GET /console/downloads`** asks every alive node that reports `downloads.available` in parallel, with a 4 s timeout each, and merges the lists. Start and control calls go to the named nodes only.
+- **CLI:** `xgi download` is a client of these endpoints:
+
+```powershell
+xgi download files  hf Qwen/Qwen2.5-7B-Instruct-GGUF --node LAB-PC-07           # list GGUF files
+xgi download start  hf Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q4_k_m.gguf --node LAB-PC-07,LAB-PC-08
+xgi download start  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/blob/main/qwen2.5-7b-instruct-q4_k_m.gguf --node LAB-PC-07
+xgi download list                                                               # every node
+xgi download pause | resume | cancel | remove LAB-PC-07/1422550f
+```
+
+`start` shows a progress line until the jobs finish (`--detach` returns at once); Ctrl+C pauses them. It finds the coordinator at `--coordinator`, else `http://127.0.0.1:<coordinator.port>` from `cluster.yaml`, and the token at `--token`, else `QWEN_CLUSTER_TOKEN`, else `cluster.yaml`. Exit codes: `0` all completed, `1` a download failed or was canceled, `2` usage error, `130` interrupted (paused).

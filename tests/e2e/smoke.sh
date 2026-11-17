@@ -2,9 +2,9 @@
 # POSIX smoke test (Linux, macOS): xgi serve + 3 xi agents on 127.0.0.1 with the mock llama.cpp
 # binaries. Needs only sh and curl. The full suite is run-e2e.ps1 (PowerShell 7 on any OS).
 #
-# Usage: smoke.sh <xgi> <xi> <mock-llama-server> <mock-rpc-server>
+# Usage: smoke.sh <xgi> <xi> <mock-llama-server> <mock-rpc-server> <mock-hub>
 set -u
-XGI="$1"; XI="$2"; MOCK_LLAMA="$3"; MOCK_RPC="$4"
+XGI="$1"; XI="$2"; MOCK_LLAMA="$3"; MOCK_RPC="$4"; MOCK_HUB="$5"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/xgi-smoke.XXXXXX")"
 TOKEN=smoke-token
 COORD=http://127.0.0.1:19100
@@ -52,6 +52,9 @@ runtimes_ok() { get "$AGENT_A/status" | tr -d ' \n' | grep -q '"language":"sh"';
 generate_ok() { post_json "$COORD/console/generate" '{"node_id":"node-a","language":"sh","prompt":"x"}' | grep -q 'Hello from mock'; }
 exec_ok() { post_json "$COORD/console/exec" '{"node_id":"node-a","language":"sh","code":"echo console-ok; pwd"}' | grep -q 'console-ok'; }
 exec_forbidden() { post_json "$COORD/console/exec" '{"node_id":"node-b","language":"sh","code":"echo x"}' | grep -q '"code":403'; }
+hub_files_ok() { get "$COORD/console/hub/files?node_id=node-a&source=huggingface&repo=test/mock" | grep -q 'mock-a.gguf'; }
+download_started() { post_json "$COORD/console/downloads" '{"node_ids":["node-a"],"source":"huggingface","repo":"test/mock","files":["mock-c.gguf"]}' | grep -q '"started":\[{'; }
+download_done() { get "$COORD/console/downloads?node_id=node-a" | tr -d ' \n' | grep -q '"state":"completed"' && [ -f "$WORK/models-a/mock-c.gguf" ]; }
 head_stopped() { get "$AGENT_A/status" | tr -d ' \n' | grep -q '"head":{"exit_code":null,"pid":null,"state":"stopped"'; }
 
 cleanup() {
@@ -60,6 +63,7 @@ cleanup() {
     for p in $PIDS; do kill -9 "$p" 2>/dev/null; done
     pkill -f "^$MOCK_LLAMA" 2>/dev/null  # anchored: must not match this script's own command line
     pkill -f "^$MOCK_RPC" 2>/dev/null
+    pkill -f "^$MOCK_HUB" 2>/dev/null
     if [ "$FAILS" -eq 0 ]; then rm -rf "$WORK"; else echo "logs kept in $WORK"; fi
 }
 trap cleanup EXIT
@@ -76,6 +80,11 @@ pools:
   - {name: pair, model_file: mock.gguf, nodes_per_group: 2, groups: 1, extra_args: ["--mock-load-s", "1"]}
 spares: 1
 EOF
+
+# Agents download from a local mock instead of huggingface.co / github.com (ADR-011).
+"$MOCK_HUB" --port 19900 > "$WORK/hub.out" 2>&1 &
+PIDS="$PIDS $!"
+export XI_HF_BASE=http://127.0.0.1:19900 XI_GITHUB_BASE=http://127.0.0.1:19900 XI_GITHUB_API_BASE=http://127.0.0.1:19900/api
 
 "$XGI" serve --config "$WORK/cluster.yaml" --log-dir "$WORK/logs-xgi" > "$WORK/xgi.out" 2>&1 &
 PIDS="$PIDS $!"
@@ -106,6 +115,9 @@ check 'node-a reports the sh runtime' runtimes_ok
 check 'console generates code through the router' generate_ok
 check 'console runs code on node-a (--allow-exec)' exec_ok
 check 'console exec refused on node-b' exec_forbidden
+check 'node lists a hub repo through the console' hub_files_ok
+check 'console starts a model download on node-a' download_started
+check 'download completes into the models folder' wait_for 30 download_done
 
 # Worker failure: kill the worker's agent (on Linux its rpc-server dies with it).
 WORKER=$(group pair-0 | sed 's/.*"workers":\["\([^"]*\)".*/\1/')

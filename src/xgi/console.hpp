@@ -34,6 +34,11 @@ private:
     void on_exec(const httplib::Request&, httplib::Response&);
     void on_config_get(const httplib::Request&, httplib::Response&);
     void on_config_post(const httplib::Request&, httplib::Response&, bool save);
+    // Model downloads, run by the agents (ADR-011).
+    void on_hub_files(const httplib::Request&, httplib::Response&);
+    void on_downloads_list(const httplib::Request&, httplib::Response&);
+    void on_downloads_start(const httplib::Request&, httplib::Response&);
+    void on_download_action(const httplib::Request&, httplib::Response&, const std::string& action);
 
     const ClusterConfig& startup_;
     ConfigStore& store_;

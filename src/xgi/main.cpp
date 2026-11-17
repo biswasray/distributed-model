@@ -18,6 +18,7 @@
 #include "xgi/config_store.hpp"
 #include "xgi/console.hpp"
 #include "xgi/coordinator.hpp"
+#include "xgi/download_cli.hpp"
 #include "xgi/router.hpp"
 
 namespace {
@@ -31,6 +32,8 @@ Usage:
   xgi router       --config cluster.yaml [--host H] [--port P]   OpenAI-compatible gateway (:8000)
   xgi serve        --config cluster.yaml                          Both in one process
   xgi check-config --config cluster.yaml                          Validate and summarise the config
+  xgi download ...                                                Download models onto nodes from
+                                                                  Hugging Face or GitHub (xgi download --help)
   xgi --version
 
 Common options:
@@ -80,6 +83,8 @@ int check_config(const xgi::ClusterConfig& c, const xgi::ConfigLocation& where) 
 }  // namespace
 
 int main(int argc, char** argv) {
+    // A client command with its own flags: talks to a running coordinator.
+    if (argc >= 2 && std::string(argv[1]) == "download") return xgi::run_download_cli(argc, argv);
     xgi::CliArgs args(argc, argv);
     if (args.has("--version")) {
         std::cout << "xgi " << xgi::kVersion << " (" << xgi::kPlatformName << ")\n";

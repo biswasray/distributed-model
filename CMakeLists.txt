@@ -67,6 +67,7 @@ add_library(xgi_common STATIC
     src/common/cli.cpp
     src/common/config.cpp
     src/common/http_util.cpp
+    src/common/hub.cpp
     src/common/log.cpp
     src/common/net.cpp
     src/common/shutdown.cpp
@@ -117,6 +118,7 @@ endif()
 add_library(xi_lib STATIC
     src/xi/agent.cpp
     src/xi/commands.cpp
+    src/xi/downloads.cpp
     src/xi/process.cpp
     src/xi/runtimes.cpp
     src/xi/settings.cpp
@@ -138,6 +140,7 @@ add_library(xgi_lib STATIC
     src/xgi/console.cpp
     "${XGI_UI_CPP}"
     src/xgi/coordinator.cpp
+    src/xgi/download_cli.cpp
     src/xgi/placement.cpp
     src/xgi/router.cpp
     src/xgi/scheduling.cpp

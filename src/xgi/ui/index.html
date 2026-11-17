@@ -16,6 +16,7 @@
   </div>
   <nav class="tabs" aria-label="Views">
     <button type="button" class="tab active" data-view="cluster">Cluster</button>
+    <button type="button" class="tab" data-view="models">Models <span class="tab-count" id="dl-count" hidden></span></button>
     <button type="button" class="tab" data-view="config">Configuration</button>
   </nav>
   <div class="summary" id="summary" aria-live="polite"></div>
@@ -111,6 +112,74 @@
         <button type="submit" class="primary" id="send-btn">Generate code</button>
       </div>
     </form>
+  </section>
+</main>
+
+<main class="models-view" id="models-view" hidden>
+  <section class="panel hub-panel" aria-labelledby="hub-title">
+    <div class="panel-head">
+      <h2 id="hub-title">Get a model</h2>
+      <div class="seg" role="group" aria-label="Source">
+        <button type="button" class="seg-btn active" id="hub-src-hf" data-src="huggingface">Hugging Face</button>
+        <button type="button" class="seg-btn" id="hub-src-gh" data-src="github">GitHub release</button>
+      </div>
+    </div>
+    <form class="hub-form" id="hub-form">
+      <label class="grow">Repository or file link
+        <input type="text" id="hub-repo" placeholder="Qwen/Qwen2.5-7B-Instruct-GGUF  or a https://huggingface.co/… link" spellcheck="false" autocomplete="off" required>
+      </label>
+      <label class="narrow-field"><span id="hub-ref-label">Branch</span>
+        <input type="text" id="hub-ref" placeholder="main" spellcheck="false" autocomplete="off">
+      </label>
+      <label class="narrow-field">Look up from
+        <select id="hub-via" title="The node that queries the hub. Downloads run on each target node."></select>
+      </label>
+      <button type="submit" class="primary" id="hub-list">List files</button>
+    </form>
+    <div class="hub-status" id="hub-status" aria-live="polite"></div>
+    <div class="hub-body">
+      <div class="hub-files" id="hub-files-wrap" hidden>
+        <div class="hub-sub">
+          <h3>Files <span class="muted" id="hub-files-count"></span></h3>
+          <label class="check small-text"><input type="checkbox" id="hub-all"> Show all files</label>
+        </div>
+        <div class="table-wrap hub-files-table">
+          <table>
+            <thead><tr><th class="cb"></th><th>File</th><th class="num">Size</th></tr></thead>
+            <tbody id="hub-files"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="hub-targets" id="hub-targets-wrap" hidden>
+        <div class="hub-sub">
+          <h3>Download to</h3>
+          <span class="spacer"></span>
+          <button type="button" class="ghost small" id="hub-pick-missing" title="Alive nodes that don't have the selected files">Missing it</button>
+          <button type="button" class="ghost small" id="hub-pick-all">All</button>
+          <button type="button" class="ghost small" id="hub-pick-none">None</button>
+        </div>
+        <div class="hub-nodes" id="hub-nodes"></div>
+        <label class="hub-dest">Folder inside each node's models folder (optional)
+          <input type="text" id="hub-dest" placeholder="e.g. qwen3-30b" spellcheck="false" autocomplete="off">
+        </label>
+        <div class="hub-go">
+          <span class="muted" id="hub-summary"></span>
+          <span class="spacer"></span>
+          <button type="button" class="primary" id="hub-start" disabled>Download</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel dl-panel" aria-labelledby="dl-title">
+    <div class="panel-head">
+      <h2 id="dl-title">Downloads</h2>
+      <button type="button" class="ghost small" id="dl-clear" title="Remove completed, failed and canceled downloads from the list">Clear finished</button>
+    </div>
+    <div class="dl-errors" id="dl-errors"></div>
+    <div class="dl-list" id="dl-list">
+      <p class="empty">No downloads yet. List a repository's files, pick the nodes, and click <b>Download</b>.</p>
+    </div>
   </section>
 </main>
 

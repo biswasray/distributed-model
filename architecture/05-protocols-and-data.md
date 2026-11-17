@@ -12,6 +12,8 @@
 | 8080 | HTTP | `llama-server` (head) | Router, coordinator (health) | **None**. Restrict with the firewall. |
 | 50052 | TCP (llama.cpp RPC) | `rpc-server` (worker) | That group's head | **None**. Restrict with the firewall. |
 
+Model downloads ([ADR-011](../adr/ADR-011-model-downloads-on-nodes.md)) need **outbound HTTPS (443)** from the nodes to `huggingface.co` and its CDN, or to `github.com`, `api.github.com` and `objects.githubusercontent.com`. XGI itself needs no internet access.
+
 All control-plane bodies are JSON (`Content-Type: application/json`). Sizes are in **bytes** and times in **seconds** (as floats).
 
 Errors from every component (router, coordinator, agent) use the same body: `{"error": {"message": ..., "type": ..., "code": ...}}` (see §4). A missing or wrong `X-Cluster-Token` gets `401`.
@@ -44,11 +46,12 @@ Errors from every component (router, coordinator, agent) use the same body: `{"e
     {"language": "powershell", "label": "Windows PowerShell", "version": "5.1.26100.1", "path": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"}
   ],
   "exec_enabled": false,
+  "downloads": {"available": true, "tool": "curl 8.13.0 (Windows) libcurl/8.13.0 Schannel ..."},
   "agent_version": "0.2.0"
 }
 ```
 
-`agent_version`, `arch`, `cpu_model`, `disk_free` (bytes free on the models dir's drive, or `null`), `binaries`, `runtimes` and `exec_enabled` are optional and informational: the console shows them ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)). The coordinator stores the whole body and returns it from `GET /nodes`, and ignores fields it doesn't know.
+`agent_version`, `arch`, `cpu_model`, `disk_free` (bytes free on the models dir's drive, or `null`), `binaries`, `runtimes`, `exec_enabled` and `downloads` are optional and informational: the console shows them ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md), [ADR-011](../adr/ADR-011-model-downloads-on-nodes.md)). `downloads.available` is false when the agent found no `curl` on its `PATH`. The coordinator stores the whole body and returns it from `GET /nodes`, and ignores fields it doesn't know.
 
 `runtimes[].language` is one of `python`, `javascript`, `powershell` (Windows only), `pwsh`, `bash`, `sh` (POSIX only), `cmd` (Windows only), `ruby`, `perl`, `php`, `lua`, `go`, `java`, `c`, `cpp`, `rust`. Only runtimes found on the agent's `PATH` whose version probe succeeds are listed.
 
@@ -184,6 +187,36 @@ Response `200`:
 
 `live` = changed settings that took effect at once; `restart` = changed settings that apply on the next XGI start. Errors: `400 {"ok": false, "error": "...", ...}` if the config is invalid (the same rules as at startup, §5) · `500` if the file can't be written. On save, the previous file is kept as `cluster.yaml.bak`, and the new one replaces it atomically.
 
+### Model downloads ([ADR-011](../adr/ADR-011-model-downloads-on-nodes.md))
+
+The console's **Models** tab and `xgi download` use these. They forward to the agents' download API (§3, "Model downloads") and need `X-Cluster-Token`. Like the rest of `/console/*`, they exist only while `console.enabled` is true.
+
+#### `GET /console/hub/files?node_id=&source=&repo=&ref=&all=`
+
+Asks the agent on `node_id` to list a repository (so it also shows whether that node can reach the hub). `source` is `huggingface` (or `hf`) or `github` (or `gh`), `repo` is `owner/name`, `ref` is a branch or commit for Hugging Face (default `main`) or a release tag for GitHub (default `latest`). Only `.gguf` files are listed unless `all=true`. The response is the agent's `GET /hub/files` body plus `node_id`.
+
+#### `GET /console/downloads[?node_id=]`
+
+```json
+{"downloads": [{"node_id": "LAB-PC-07", "id": "1422550f", "state": "downloading", "...": "the agent's job fields"}],
+ "errors": [{"node_id": "LAB-PC-12", "error": "Connection timed out"}]}
+```
+
+The jobs of every alive node that can download (or of one node), newest first. The coordinator asks the agents in parallel (4 s timeout each); a node that can't be read is listed in `errors`.
+
+#### `POST /console/downloads`
+
+```json
+{"node_ids": ["LAB-PC-07", "LAB-PC-08"], "source": "huggingface", "repo": "Qwen/Qwen2.5-7B-Instruct-GGUF",
+ "ref": "main", "files": ["qwen2.5-7b-instruct-q4_k_m.gguf"], "dest_dir": "qwen2.5-7b"}
+```
+
+Starts the same download on each node (`node_id` with one string also works). Everything except `node_ids` is sent to the agents as the `POST /downloads` body. Response `200` if at least one node started: `{"started": [<job + node_id>, ...], "errors": [{"node_id", "code", "error"}, ...]}`. If none started, the status is the first error's code and the body also has `error`.
+
+#### `POST /console/downloads/{node_id}/{id}/pause|resume|cancel` · `DELETE /console/downloads/{node_id}/{id}`
+
+Forwarded to the agent; the response is the agent's (plus `node_id`). `404` unknown node · `409` the node is dead · otherwise the agent's status.
+
 ## 3. Agent API
 
 ### `POST /rpc/start`
@@ -297,6 +330,71 @@ Response `200`, also when the program fails or times out:
 ```
 
 `output` is the merged stdout and stderr, as the last 500 lines, each cut at 4000 characters. `stage` is `compile` if a compile step failed. `exit_code` is `null` when the program was killed for timing out. Errors: `403` exec disabled · `400` bad input, or the language isn't available on this node · `429` 2 jobs already running (`Retry-After: 5`).
+
+### Model downloads ([ADR-011](../adr/ADR-011-model-downloads-on-nodes.md))
+
+The agent downloads files from a Hugging Face model repo or a GitHub release into its models folder with the system `curl`. Jobs are kept in memory (the 50 newest); a `.part` file survives an agent restart, and a new download of the same file resumes it.
+
+#### `GET /hub/files?source=&repo=&ref=&all=`
+
+```json
+{"source": "huggingface", "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "ref": "main", "total_files": 12,
+ "files": [{"path": "qwen2.5-0.5b-instruct-q4_k_m.gguf", "size_bytes": 491400032}]}
+```
+
+Parameters as for `GET /console/hub/files`. For GitHub, `ref` comes back as the resolved tag (`latest` → `b4500`). `files` holds `.gguf` files only unless `all=true`; `total_files` counts all of them. Errors: `400` bad source, repo or ref · `404` repo, revision or release not found (Hugging Face also answers this way for private or gated repos without `HF_TOKEN`) · `502` the hub could not be reached or gave an error · `503` no `curl` on this node · `504` no answer within 60 s.
+
+#### `POST /downloads`
+
+```json
+{"source": "huggingface", "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "ref": "main",
+ "files": ["qwen2.5-0.5b-instruct-q4_k_m.gguf"], "dest_dir": "qwen05"}
+```
+
+| Field | Rules |
+|---|---|
+| `source` | `huggingface` \| `hf` \| `github` \| `gh` |
+| `repo` | `owner/name`: each part 1–96 of `A-Z a-z 0-9 . _ -` |
+| `ref` | Optional. Branch, tag or commit (1–128 of `A-Z a-z 0-9 . _ - + /`). Default `main` (Hugging Face) or `latest` (GitHub). |
+| `files` | 1–64 paths in the repo (Hugging Face paths may contain `/`; GitHub asset names may not). No `.`/`..` segments, `\`, `:` or control characters. |
+| `dest_dir` | Optional folder under the models folder, same rules. |
+
+Each file is saved as `<models_dir>/<dest_dir>/<file name>` (the repo's folders are dropped, so the parts of a split GGUF stay together), first as `<name>.part`. The `model_file` to use in a pool is the `target` shown in the job.
+
+Response `201`: the job (below), in state `starting`. Errors: `400` invalid request · `409` another unfinished job (including a paused one) writes the same file · `429` 3 downloads already running on this node · `503` no `curl`.
+
+**Job:**
+
+```json
+{"id": "1422550f", "source": "huggingface", "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "ref": "main",
+ "dest_dir": "qwen05", "state": "downloading", "error": "",
+ "files": [{"path": "qwen2.5-0.5b-instruct-q4_k_m.gguf", "target": "qwen05/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+            "size_bytes": 491400032, "done_bytes": 159436800, "state": "downloading"}],
+ "current_file": 0, "done_bytes": 159436800, "total_bytes": 491400032, "speed_bps": 16900000.0, "eta_s": 19.6,
+ "created_at": 1794908930.9, "updated_at": 1794908940.1, "finished_at": null}
+```
+
+| `state` | Meaning |
+|---|---|
+| `starting` | Listing the repo: resolving the ref and file sizes, checking the files exist and that there is disk space |
+| `downloading` | curl is running (`speed_bps` and `eta_s` are set) |
+| `pausing` / `canceling` | Stop requested; becomes `paused` / `canceled` within a second |
+| `paused` | Stopped; the `.part` files are kept |
+| `completed` | Every file is in place. A file that was already there (same size) has file state `present` and is not downloaded again. |
+| `failed` | See `error`. Resume retries it from where it stopped. |
+| `canceled` | Stopped and the `.part` files deleted |
+
+File `state` is `pending`, `downloading`, `done` or `present`. `total_bytes` and `size_bytes` are `null` if the hub gave no size. A failed transfer is retried 5 times (3 s, 6 s, …), and a stall (under 1 byte/s for 2 minutes) counts as a failure. HTTP 401/403/404 fail at once. A file that would overwrite a different-sized existing file fails. After each completed file the agent re-registers, so the coordinator's `models` list includes it.
+
+#### `GET /downloads`
+
+`{"downloads": [<job>, ...], "available": true}`, newest first.
+
+#### `POST /downloads/{id}/pause` · `/resume` · `/cancel` · `DELETE /downloads/{id}`
+
+`pause` (running jobs) and `cancel` (anything not completed) return the job. `resume` takes a `paused` or `failed` job and returns it. `DELETE` removes a job that isn't running from the list (its `.part` files stay, so a paused download can still be resumed by starting it again). Errors: `404` unknown id · `409` wrong state (e.g. resume while still stopping, cancel after completion) · `429` (resume) 3 downloads running.
+
+Gated or private repos need `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) for Hugging Face and `GITHUB_TOKEN` (or `GH_TOKEN`) for GitHub **in the agent's environment**. curl gets the token in a temporary header file, never on its command line. For tests, `XI_HF_BASE`, `XI_GITHUB_BASE` and `XI_GITHUB_API_BASE` replace the hub origins.
 
 ## 4. Router API
 

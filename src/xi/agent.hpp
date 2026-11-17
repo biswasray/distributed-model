@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "common/util.hpp"
+#include "xi/downloads.hpp"
 #include "xi/process.hpp"
 #include "xi/runtimes.hpp"
 #include "xi/settings.hpp"
@@ -72,6 +73,7 @@ private:
 
     void setup_routes();
     void setup_ui_routes();
+    void setup_download_routes();
     void on_get_settings(const httplib::Request&, httplib::Response&);
     void on_put_settings(const httplib::Request&, httplib::Response&);
     void control_loop();
@@ -109,6 +111,8 @@ private:
     std::vector<Runtime> runtimes_;
     std::mutex detect_mu_;  // one detection at a time
     std::atomic<int> exec_jobs_{0};
+
+    std::unique_ptr<Downloads> downloads_;  // model downloads (ADR-011)
 };
 
 }  // namespace xi

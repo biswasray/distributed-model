@@ -117,24 +117,24 @@ ctest --preset vs-release         # Visual Studio builds
 
 | Test | Where | What it does |
 |---|---|---|
-| `unit` | everywhere | Config validation, placement algorithm (including a 50-node hybrid layout), router queueing and least-busy selection, llama.cpp command lines, model-path traversal guard |
-| `e2e` | Windows, or any OS with PowerShell 7 (`pwsh`) | `xgi serve` + 4 `xi` agents on `127.0.0.1` with mock llama.cpp: auth, deploy, routing, streaming, worker failure → repair onto the spare, head crash → restart, drain/undrain, restart, undeploy (37 checks) |
-| `smoke` | Linux / macOS (needs `curl`) | `sh` version of the core of the e2e test: register, deploy, routing, streaming, worker failure → repair, head crash → restart, undeploy |
+| `unit` | everywhere | Config validation, placement algorithm (including a 50-node hybrid layout), router queueing and least-busy selection, llama.cpp command lines, model-path traversal guard, hub URLs and download request validation |
+| `e2e` | Windows, or any OS with PowerShell 7 (`pwsh`) | `xgi serve` + 4 `xi` agents on `127.0.0.1` with mock llama.cpp and a mock Hugging Face/GitHub (`mock-hub`): auth, deploy, routing, streaming, console, settings, model downloads (progress, pause/resume, cancel, `xgi download`), worker failure → repair onto the spare, head crash → restart, drain/undrain, restart, undeploy |
+| `smoke` | Linux / macOS (needs `curl`) | `sh` version of the core of the e2e test: register, deploy, routing, streaming, console, a model download, worker failure → repair, head crash → restart, undeploy |
 
 Run them by hand and keep the logs:
 
 ```sh
 B=build/release
-sh tests/e2e/smoke.sh $B/xgi $B/xi $B/tests/mock-llama-server $B/tests/mock-rpc-server
+sh tests/e2e/smoke.sh $B/xgi $B/xi $B/tests/mock-llama-server $B/tests/mock-rpc-server $B/tests/mock-hub
 pwsh tests/e2e/run-e2e.ps1 -Xgi $B/xgi -Xi $B/xi -MockLlama $B/tests/mock-llama-server \
-     -MockRpc $B/tests/mock-rpc-server -WorkDir /tmp/xgi-e2e -KeepWorkDir
+     -MockRpc $B/tests/mock-rpc-server -MockHub $B/tests/mock-hub -WorkDir /tmp/xgi-e2e -KeepWorkDir
 ```
 ```powershell
 $b = "build\vs"
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\e2e\run-e2e.ps1 `
   -Xgi "$b\Release\xgi.exe" -Xi "$b\Release\xi.exe" `
   -MockLlama "$b\tests\Release\mock-llama-server.exe" -MockRpc "$b\tests\Release\mock-rpc-server.exe" `
-  -WorkDir C:\temp\xgi-e2e -KeepWorkDir
+  -MockHub "$b\tests\Release\mock-hub.exe" -WorkDir C:\temp\xgi-e2e -KeepWorkDir
 ```
 
 The logs are in `<WorkDir>/logs-xgi/xgi.log` (coordinator and router) and `logs-<node>/` (each agent's `xi.log`, `head.log`, and `rpc.log`).
@@ -150,7 +150,7 @@ This runs the whole stack on one machine: XGI, one XI agent, and a single-node `
 1. Get llama.cpp with `llama-server` and `rpc-server`:
    - **Windows:** download a **CPU (AVX2)** release from the official llama.cpp GitHub releases, and extract it to `C:\qwen-cluster\llama.cpp\`.
    - **Linux / macOS:** use the official release for your OS, or build it: `cmake -B build -DGGML_RPC=ON && cmake --build build -j`. Put `llama-server` and `rpc-server` in `/opt/qwen-cluster/llama.cpp/`. On macOS, Metal is enabled by default; the cluster design assumes CPU, so it works either way.
-2. Download `qwen2.5-7b-instruct-q4_k_m.gguf` (~4.7 GB) from `Qwen/Qwen2.5-7B-Instruct-GGUF` on Hugging Face, and put it in the `models` folder next to `llama.cpp`. If the download comes split into parts, use the first part's file name in `model_file`.
+2. Download `qwen2.5-7b-instruct-q4_k_m.gguf` (~4.7 GB) from `Qwen/Qwen2.5-7B-Instruct-GGUF` on Hugging Face, and put it in the `models` folder next to `llama.cpp`. If the download comes split into parts, use the first part's file name in `model_file`. (Or, once XGI and XI are running in §3.3, let the agent fetch it: `xgi download start hf Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q4_k_m.gguf --node <name>`, or use the console's **Models** tab.)
 
 ### 3.2 Write a one-pool config
 
@@ -345,6 +345,8 @@ Clients use `http://192.168.1.10:8000/v1`. If `router.api_keys` is set, they als
 
 **Web console:** open `http://192.168.1.10:8100/ui/` in a browser and enter the cluster token. It shows node health, system details and languages, groups, and a chat box that writes code with the cluster's model and (if enabled) runs it on a node. See the [operator guide §12.1](distributed-qwen-cluster.md#121-web-console).
 
+**Model downloads:** the console's **Models** tab, or `xgi download`, has nodes fetch GGUF files from Hugging Face or GitHub releases into their models folder, with progress, pause, resume and cancel. See the [operator guide §12.3](distributed-qwen-cluster.md#123-downloading-models-onto-nodes).
+
 All coordinator calls except `/health` and the console page need `X-Cluster-Token`. The table uses curl, with `$T` and `$C` set as in §4.3. On Windows, use `curl.exe` or the `Invoke-RestMethod` forms above.
 
 | Task | Command |
@@ -357,6 +359,8 @@ All coordinator calls except `/health` and the console page need `X-Cluster-Toke
 | Restart one group | `curl -s -X POST -H "$T" $C/groups/qwen3-30b-a3b-3/restart` |
 | Apply a changed `cluster.yaml` | Restart `xgi`, then `curl -s -X POST -H "$T" "$C/deploy?force=true"` |
 | Stop everything | `curl -s -X POST -H "$T" $C/undeploy` |
+| Download a model onto two nodes | `xgi download start hf Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q4_k_m.gguf --node LAB-PC-07,LAB-PC-08` |
+| Downloads on every node · pause one | `xgi download list` · `xgi download pause LAB-PC-07/<id>` |
 | Last 100 lines of a head's llama-server | `curl -s -H "$T" "http://<node-ip>:8200/logs/head?lines=100"` |
 
 ### What happens on its own

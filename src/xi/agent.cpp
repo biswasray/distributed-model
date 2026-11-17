@@ -56,6 +56,12 @@ Agent::Agent(AgentBoot boot)
     for (const auto& r : runtimes_) names.push_back(r.id);
     xgi::log::info("runtimes: {}; console exec {}", names.empty() ? "none" : xgi::join(names, ", "),
                    running_.allow_exec ? "ENABLED" : "off");
+    downloads_ = std::make_unique<Downloads>(
+        [this] {
+            auto snap = snapshot();
+            return Downloads::Paths{snap.r.models_dir, xgi::path_from_utf8(snap.s.log_dir)};
+        },
+        [this] { reregister_ = true; });  // the coordinator learns about the new model file
     setup_routes();
 }
 
@@ -123,6 +129,7 @@ json Agent::facts(const Snapshot& snap) {
                       {"llama_server", fs::exists(snap.r.llama_server_bin, ec)}}},
         {"runtimes", rts},
         {"exec_enabled", snap.s.allow_exec},
+        {"downloads", downloads_ ? downloads_->tool_json() : json{{"available", false}, {"tool", nullptr}}},
         {"agent_version", xgi::kVersion},
     };
 }
@@ -145,6 +152,7 @@ void Agent::setup_routes() {
     });
 
     setup_ui_routes();
+    setup_download_routes();
 
     s.Get("/status", [this](const httplib::Request&, httplib::Response& res) { xgi::reply_json(res, 200, facts()); });
 
@@ -328,6 +336,58 @@ void Agent::setup_ui_routes() {
         xgi::log::info("runtimes re-detected: {} found", out.size());
         reregister_ = true;  // tell the coordinator
         xgi::reply_json(res, 200, json{{"runtimes", out}});
+    });
+}
+
+// Model downloads from Hugging Face / GitHub (02 §11, ADR-011).
+void Agent::setup_download_routes() {
+    auto& s = server_;
+    auto guarded = [](httplib::Response& res, const std::function<void()>& fn) {
+        try {
+            fn();
+        } catch (const DownloadError& e) {
+            xgi::reply_error(res, e.status, e.what(), e.type);
+        } catch (const std::invalid_argument& e) {
+            xgi::reply_error(res, 400, e.what(), "invalid_request");
+        }
+    };
+    s.Get("/downloads", [this](const httplib::Request&, httplib::Response& res) {
+        xgi::reply_json(res, 200, downloads_->list());
+    });
+    s.Post("/downloads", [this, guarded](const httplib::Request& req, httplib::Response& res) {
+        auto body = xgi::parse_body(req, res);
+        if (!body) return;
+        guarded(res, [&] {
+            auto r = DownloadRequest::from_json(*body);
+            xgi::log::info("download requested by {}: {} {} ({} file(s))", req.remote_addr,
+                           xgi::hub::source_name(r.source), r.repo, r.files.size());
+            xgi::reply_json(res, 201, downloads_->start(r));
+        });
+    });
+    s.Post(R"(/downloads/([0-9a-f]+)/(pause|resume|cancel))", [this, guarded](const httplib::Request& req,
+                                                                             httplib::Response& res) {
+        std::string id = req.matches[1], action = req.matches[2];
+        guarded(res, [&] {
+            json out = action == "pause" ? downloads_->pause(id) : action == "resume" ? downloads_->resume(id)
+                                                                                      : downloads_->cancel(id);
+            xgi::reply_json(res, 200, out);
+        });
+    });
+    s.Delete(R"(/downloads/([0-9a-f]+))", [this, guarded](const httplib::Request& req, httplib::Response& res) {
+        std::string id = req.matches[1];
+        guarded(res, [&] {
+            downloads_->remove(id);
+            xgi::reply_json(res, 200, json{{"ok", true}});
+        });
+    });
+    s.Get("/hub/files", [this, guarded](const httplib::Request& req, httplib::Response& res) {
+        guarded(res, [&] {
+            auto src = xgi::hub::parse_source(req.get_param_value("source"));
+            if (!src) throw std::invalid_argument("source must be huggingface or github");
+            bool all = xgi::to_lower(req.get_param_value("all")) == "true" || req.get_param_value("all") == "1";
+            xgi::reply_json(res, 200,
+                            downloads_->hub_files(*src, req.get_param_value("repo"), req.get_param_value("ref"), all));
+        });
     });
 }
 
@@ -545,6 +605,7 @@ void Agent::request_shutdown() {
     // Stop the children before the HTTP server: on Linux they carry PR_SET_PDEATHSIG, which
     // fires when the server thread that started them exits, and would skip the graceful stop.
     stop_flag_.request_stop();
+    downloads_->shutdown();  // pauses them: the .part files stay for a later resume
     {
         std::lock_guard lk(start_mu_);
         head_->stop(15);
@@ -559,6 +620,7 @@ void Agent::stop() {
     stop_flag_.request_stop();
     server_.stop();
     if (control_thread_.joinable()) control_thread_.join();
+    downloads_->shutdown();
     std::lock_guard lk(start_mu_);
     head_->stop(15);
     rpc_->stop(15);

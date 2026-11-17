@@ -298,7 +298,12 @@ Download GGUF files **only to head nodes**. Workers receive their slices over RP
 | Qwen3-30B-A3B | `Qwen/Qwen3-30B-A3B-GGUF` | `*Q4_K_M.gguf` |
 | Qwen2.5-7B-Instruct | `Qwen/Qwen2.5-7B-Instruct-GGUF` | `*q4_k_m*.gguf` |
 
-To save Wi-Fi bandwidth, download once to a USB drive or a wired machine and copy the files to the head nodes. Don't have 16 heads download the same file over Wi-Fi.
+Two ways to get them there:
+
+- **From XGI (needs internet access on the nodes):** in the web console's **Models** tab, or with `xgi download`, pick the repo and file, and the nodes download straight into their models folder, with progress, pause, resume and cancel (§12.3). Use **Missing it** to pick only the nodes that don't have the file yet.
+- **By hand:** download once to a USB drive or a wired machine and copy the files into `C:\qwen-cluster\models` on the head nodes.
+
+Either way, don't have 16 heads download the same 18 GB file over Wi-Fi at once: start a few at a time, or copy by hand.
 
 ### 7.5 Install the cluster services
 
@@ -493,6 +498,7 @@ Plain-text completion, passed through to the head node.
 | POST | `/drain/{node_id}` · `/undrain/{node_id}` | Take a node out of service gracefully, or return it |
 | GET | `/ui/` | Web console (§12.1). No token needed to load the page. |
 | POST | `/console/generate` · `/console/exec` | Console: generate code with a pool, run code on a node |
+| GET / POST | `/console/hub/files` · `/console/downloads` | Console and `xgi download`: list a Hugging Face repo or GitHub release; start, list and control model downloads on nodes (§12.3) |
 
 All coordinator endpoints except `/health` and the console page need the header `X-Cluster-Token`. Full schemas are in [architecture/05-protocols-and-data.md](architecture/05-protocols-and-data.md).
 
@@ -587,6 +593,38 @@ Each node has its own page at `http://<node-ip>:8200/ui/` (on the node itself, `
 - A new node needs no coordinator URL at install time: install the task, open `http://127.0.0.1:8200/ui/#settings` on the node, and set it there.
 - **Code execution can only be switched on at the node itself** (from its own browser, `-AllowExec` at install, or by editing `xi.yaml`). It can be switched off from anywhere.
 
+### 12.3 Downloading models onto nodes
+
+The agents download GGUF files from **Hugging Face** model repos or **GitHub releases** into their models folder ([ADR-011](adr/ADR-011-model-downloads-on-nodes.md)). They use `curl`, which Windows 10 1803+ already includes, and need HTTPS access to `huggingface.co` or `github.com`. XGI only passes the requests on.
+
+**In the web console** (`http://192.168.1.10:8100/ui/#models`):
+
+1. Choose **Hugging Face** or **GitHub release**, type the repo (`Qwen/Qwen2.5-7B-Instruct-GGUF`) or paste a file link, and click **List files**. The node in *Look up from* asks the hub, which also proves it can reach it.
+2. Tick the files. Ticking one part of a split model (`…-00001-of-00003.gguf`) ticks all its parts.
+3. Tick the target nodes (**Missing it** selects the nodes that don't have the files yet). Optionally enter a folder inside the models folder, then click **Download**.
+4. The **Downloads** list shows each node's progress, speed and time left. **Pause** keeps the partial file; **Resume** continues from there, even after the agent has restarted. **Cancel** deletes the partial file. A failed download can be retried with **Retry**.
+
+When a file completes, the node re-registers and the coordinator knows it has the model, so you can deploy a pool that uses it. Use the `target` path the list shows (e.g. `qwen2.5-7b/qwen2.5-7b-instruct-q4_k_m.gguf`) as the pool's `model_file`.
+
+**From the command line** (on the coordinator machine, or anywhere with `--coordinator`):
+
+```powershell
+xgi download files hf Qwen/Qwen2.5-7B-Instruct-GGUF --node LAB-PC-07
+xgi download start hf Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q4_k_m.gguf --node LAB-PC-07,LAB-PC-08
+xgi download start https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/blob/main/qwen2.5-7b-instruct-q4_k_m.gguf --node LAB-PC-07
+xgi download list
+xgi download pause  LAB-PC-07/1422550f      # also: resume, cancel, remove
+```
+
+`start` shows a progress bar until the downloads finish; **Ctrl+C pauses them** (resume later with `xgi download resume`), and `--detach` returns at once. For GitHub, use `github` and a release asset name; `--ref` picks a release tag (default: the latest release). `xgi download --help` lists every option.
+
+**Private or gated models** (for example ones that need you to accept a licence on Hugging Face) need a read token on each downloading node, set for the agent's account and followed by an agent restart:
+
+```powershell
+[Environment]::SetEnvironmentVariable('HF_TOKEN', '<read token>', 'Machine')     # GitHub: GITHUB_TOKEN
+Stop-ScheduledTask -TaskName QwenNodeAgent; Start-ScheduledTask -TaskName QwenNodeAgent
+```
+
 ---
 
 ## 13. Security
@@ -597,6 +635,7 @@ Each node has its own page at `http://<node-ip>:8200/ui/` (on the node itself, `
 - Allow those ports only on the **Private** firewall profile, and preferably only from cluster IPs (`-RemoteAddress 192.168.1.0/24`).
 - If the router must be reachable more widely, put it behind a reverse proxy with authentication (an API key) and HTTPS.
 - Prompts and responses travel unencrypted on the LAN. Don't send sensitive data unless the network is secured.
+- Model downloads only come from Hugging Face repos and GitHub releases, into the models folder, and never overwrite a file. A node's `HF_TOKEN` stays on that node.
 - Keep the web console's code execution off (`console.allow_exec: false`) unless you need it. When it's on, the cluster token lets its holder run code on every node started with `--allow-exec` (§12.1).
 
 ---
@@ -612,6 +651,10 @@ Each node has its own page at `http://<node-ip>:8200/ui/` (on the node itself, `
 | Group repeatedly marked degraded | A node is sleeping or roaming between access points | Turn off sleep and hibernation, set the Wi-Fi adapter to "maximum performance", and fix the IP |
 | Strange errors after update | Mixed llama.cpp versions | Use the same version everywhere |
 | Router returns 503 | No healthy groups in the pool | Check `GET /groups` and the head node logs |
+| Models tab: "no node can download" | `curl` not on the agent's `PATH` | Windows 10 1803+ has `C:\Windows\System32\curl.exe`. On Linux, install `curl` and restart the agent. |
+| Download fails with "not found … private or gated" | Wrong repo or file name, or the repo needs a token | Check the name on the hub's website. For gated models, accept the licence there and set `HF_TOKEN` on the node (§12.3). |
+| Download fails with "Could not resolve host" or keeps retrying | The node has no internet access, or a proxy is needed | Test on the node with `curl.exe -I https://huggingface.co`. Set `HTTPS_PROXY` for the agent if your network uses a proxy, or copy the file by hand. |
+| Download fails: "already exists with a different size" | A different or incomplete file has the same name | Delete or rename the old file in the models folder (stop any group using it first), then **Retry**. |
 
 ### Useful commands
 

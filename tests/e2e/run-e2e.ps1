@@ -3,7 +3,8 @@
   End-to-end test: xgi serve + 4 xi agents on localhost, driving mock llama.cpp binaries.
 
   Covers: registration, auth (cluster token + API keys), deploy/409, group start sequence,
-  routing (stream + non-stream), unknown model, web console (UI, generate, exec),
+  routing (stream + non-stream), unknown model, web console (UI, generate, exec), model downloads
+  (mock Hugging Face/GitHub: progress, pause/resume, cancel, CLI),
   worker failure -> repair onto the spare, drain -> unplaced -> undrain -> healthy, restart, undeploy.
 #>
 param(
@@ -11,6 +12,7 @@ param(
     [Parameter(Mandatory)][string]$Xi,
     [Parameter(Mandatory)][string]$MockLlama,
     [Parameter(Mandatory)][string]$MockRpc,
+    [Parameter(Mandatory)][string]$MockHub,
     [string]$WorkDir = (Join-Path $env:TEMP "xgi-e2e-$PID"),
     [switch]$KeepWorkDir
 )
@@ -117,6 +119,11 @@ spares: 1
 "@ | Set-Content -Path (Join-Path $WorkDir 'cluster.yaml') -Encoding ascii
 
     $env:QWEN_CLUSTER_TOKEN = $token
+    # The agents download from a local mock instead of huggingface.co / github.com.
+    Start-Bg 'mock-hub' $MockHub @('--port', '18900') | Out-Null
+    $env:XI_HF_BASE = 'http://127.0.0.1:18900'
+    $env:XI_GITHUB_BASE = 'http://127.0.0.1:18900'
+    $env:XI_GITHUB_API_BASE = 'http://127.0.0.1:18900/api'
     Log 'starting xgi serve'
     Start-Bg 'xgi' $Xgi @('serve', '--config', "`"$WorkDir\cluster.yaml`"", '--log-dir', "`"$WorkDir\logs-xgi`"") | Out-Null
     Check (WaitFor { (Call GET "$coord/health").Status -eq 200 } 15 'coordinator') 'coordinator /health is up (no token needed)'
@@ -227,6 +234,65 @@ spares: 1
     $off = Call PUT "$agentB/agent/settings" @{ settings = @{ allow_exec = $false } } $T
     Check ($off.Status -eq 200 -and (Call POST "$agentB/exec" @{ language = $lang; code = $code } $T).Status -eq 403) 'exec turned off again takes effect at once'
 
+    # --- model downloads from the (mock) hubs, driven through the console (ADR-011)
+    $agentC = 'http://127.0.0.1:18203'
+    $nc = Nodes | Where-Object { $_.node_id -eq 'node-c' }
+    Check ($nc.downloads.available -eq $true) 'node facts report that downloads are available (curl found)'
+    $lf = Call GET "$coord/console/hub/files?node_id=node-c&source=huggingface&repo=test/mock" $null $T
+    Check ($lf.Status -eq 200 -and $lf.Json.ref -eq 'main' -and @($lf.Json.files).Count -eq 4 -and $lf.Json.total_files -eq 5) 'GET /console/hub/files lists the GGUF files (via the node)'
+    $lfAll = (Call GET "$coord/console/hub/files?node_id=node-c&source=huggingface&repo=test/mock&all=true" $null $T).Json
+    Check (@($lfAll.files).Count -eq 5) 'hub listing with all=true includes non-GGUF files'
+    $nf = Call GET "$coord/console/hub/files?node_id=node-c&source=hf&repo=no/such" $null $T
+    Check ($nf.Status -eq 404 -and $nf.Json.error.message -like '*not found*') 'listing an unknown repo -> 404 with a clear message'
+    Check ((Call POST "$coord/console/downloads" @{ node_ids = @('node-c'); source = 'hf'; repo = 'test/mock'; files = @('../x.gguf') } $T).Status -eq 400) 'download with a path outside the models folder -> 400'
+
+    $dl = Call POST "$coord/console/downloads" @{ node_ids = @('node-c', 'node-d'); source = 'huggingface'; repo = 'test/mock'; files = @('mock-a.gguf') } $T
+    Check ($dl.Status -eq 200 -and @($dl.Json.started).Count -eq 2) 'POST /console/downloads starts the download on 2 nodes'
+    $jc = ($dl.Json.started | Where-Object { $_.node_id -eq 'node-c' }).id
+    $jd = ($dl.Json.started | Where-Object { $_.node_id -eq 'node-d' }).id
+    function DlJob($node, $id) { Items (Call GET "$coord/console/downloads?node_id=$node" $null $T).Json.downloads | Where-Object { $_.id -eq $id } }
+    Check ((Call POST "$coord/console/downloads" @{ node_ids = @('node-c'); source = 'hf'; repo = 'test/mock'; files = @('mock-a.gguf') } $T).Status -eq 409) 'a second download of the same file on the same node -> 409'
+    Check (WaitFor { $j = DlJob 'node-c' $jc; $j.state -eq 'downloading' -and $j.done_bytes -gt 0 } 20 'progress') 'download reports progress (done_bytes, total_bytes)'
+    $pz = Call POST "$coord/console/downloads/node-c/$jc/pause" @{} $T
+    Check ($pz.Status -eq 200 -and (WaitFor { (DlJob 'node-c' $jc).state -eq 'paused' } 10 'paused')) 'pause stops the download'
+    $partFile = Join-Path $WorkDir 'models-c\mock-a.gguf.part'
+    $kept = if (Test-Path $partFile) { (Get-Item $partFile).Length } else { 0 }
+    Start-Sleep -Milliseconds 800
+    $after = if (Test-Path $partFile) { (Get-Item $partFile).Length } else { -1 }
+    Check ($kept -gt 0 -and $after -eq $kept -and $kept -lt 8000000) "paused download keeps its .part file ($kept bytes) and stops growing"
+    Check ((Call POST "$coord/console/downloads/node-c/$jc/resume" @{} $T).Status -eq 200) 'resume is accepted'
+    Check (WaitFor { (DlJob 'node-c' $jc).state -eq 'completed' } 40 'completed c') 'resumed download completes'
+    $mf = Join-Path $WorkDir 'models-c\mock-a.gguf'
+    $okBytes = (Test-Path $mf) -and (Get-Item $mf).Length -eq 8000000 -and -not (Test-Path $partFile)
+    if ($okBytes) {  # resumed with a Range request: the bytes must still be in order
+        $fs = [IO.File]::OpenRead($mf); $buf = New-Object byte[] 16; [void]$fs.Seek(7999984, 'Begin'); [void]$fs.Read($buf, 0, 16); $fs.Close()
+        $okBytes = (0..15 | Where-Object { $buf[$_] -ne ((7999984 + $_) % 251) }).Count -eq 0
+    }
+    Check $okBytes 'downloaded file has the right size and content after pause/resume; .part removed'
+    Check (WaitFor { (DlJob 'node-d' $jd).state -eq 'completed' } 40 'completed d') 'the same download completes on node-d'
+    Check (WaitFor { (Nodes | Where-Object { $_.node_id -eq 'node-c' }).models -contains 'mock-a.gguf' } 10 'model known') 'coordinator learns about the new model file (agent re-registers)'
+    $again = Call POST "$coord/console/downloads" @{ node_ids = @('node-c'); source = 'hf'; repo = 'test/mock'; files = @('mock-a.gguf') } $T
+    $ja = $again.Json.started[0].id
+    Check ((WaitFor { (DlJob 'node-c' $ja).state -eq 'completed' } 10 'present') -and (DlJob 'node-c' $ja).files[0].state -eq 'present') 'downloading a file that is already there completes as "present"'
+
+    $sp = Call POST "$coord/console/downloads" @{ node_ids = @('node-c'); source = 'hf'; repo = 'test/mock'; dest_dir = 'split'; files = @('split/mock-b-00001-of-00002.gguf', 'split/mock-b-00002-of-00002.gguf') } $T
+    $js = $sp.Json.started[0].id
+    Check (WaitFor { $j = DlJob 'node-c' $js; $j.state -eq 'downloading' -and $j.done_bytes -gt 0 } 20 'split progress') 'split GGUF (2 files) downloads into a folder'
+    Check ((Call POST "$coord/console/downloads/node-c/$js/cancel" @{} $T).Status -eq 200 -and (WaitFor { (DlJob 'node-c' $js).state -eq 'canceled' } 10 'canceled')) 'cancel stops the download'
+    Check (@(Get-ChildItem (Join-Path $WorkDir 'models-c\split') -Filter '*.part' -ErrorAction SilentlyContinue).Count -eq 0) 'cancel deletes the partial files'
+    Check ((Call DELETE "$coord/console/downloads/node-c/$js" $null $T).Status -eq 200 -and -not (DlJob 'node-c' $js)) 'DELETE removes a finished download from the list'
+
+    $gh = Call POST "$coord/console/downloads" @{ node_ids = @('node-c'); source = 'github'; repo = 'test/mock'; files = @('mock-gh.gguf') } $T
+    $jg = $gh.Json.started[0].id
+    Check ((WaitFor { (DlJob 'node-c' $jg).state -eq 'completed' } 20 'gh') -and (DlJob 'node-c' $jg).ref -eq 'v1' -and (Get-Item (Join-Path $WorkDir 'models-c\mock-gh.gguf')).Length -eq 500000) 'GitHub release asset downloads (latest -> v1, through a redirect)'
+
+    $cliOut = & $Xgi download start hf test/mock mock-c.gguf --node node-d --coordinator $coord --token $token 2>&1
+    Check ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $WorkDir 'models-d\mock-c.gguf'))) "xgi download start (CLI) downloads and waits: $(($cliOut | Select-Object -Last 1))"
+    $cliList = (& $Xgi download list --node node-c --coordinator $coord --token $token 2>&1) -join "`n"
+    Check ($LASTEXITCODE -eq 0 -and $cliList -match "node-c/$jc\s+completed") 'xgi download list shows the jobs'
+    $cliFiles = (& $Xgi download files hf test/mock --node node-c --coordinator $coord --token $token 2>&1) -join "`n"
+    Check ($LASTEXITCODE -eq 0 -and $cliFiles -match 'mock-a\.gguf') 'xgi download files lists the repo'
+
     # --- failover: kill the worker's agent (its rpc-server dies with it)
     $victim = $pair.workers[0]
     Log "killing agent $victim (worker of pair-0)"
@@ -272,7 +338,7 @@ spares: 1
 finally {
     Log 'cleaning up'
     foreach ($p in $procs) { if (-not $p.HasExited) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } } }
-    Get-Process -Name 'mock-llama-server', 'mock-rpc-server' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Process -Name 'mock-llama-server', 'mock-rpc-server', 'mock-hub' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     if ($script:failures -gt 0) {
         Write-Host "logs kept in $WorkDir" -ForegroundColor Yellow
     } elseif (-not $KeepWorkDir) {

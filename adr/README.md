@@ -14,6 +14,7 @@ Each ADR records one significant decision: its context, what was decided, and th
 | [ADR-008](ADR-008-cross-platform-build.md) | Cross-platform XGI/XI (Windows, Linux, macOS) with any C++20 compiler | Accepted |
 | [ADR-009](ADR-009-web-console-and-node-code-execution.md) | Web console on XGI and opt-in code execution on nodes | Proposed |
 | [ADR-010](ADR-010-agent-web-page-and-runtime-settings.md) | XI web page and runtime settings in xi.yaml | Proposed |
+| [ADR-011](ADR-011-model-downloads-on-nodes.md) | Model downloads onto nodes from Hugging Face and GitHub | Proposed |
 
 ## Template
 

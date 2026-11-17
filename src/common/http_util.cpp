@@ -85,6 +85,8 @@ HttpResult http_call(const std::string& method, const std::string& base_url, con
     httplib::Result r;
     if (method == "GET") {
         r = cli.Get(path, headers);
+    } else if (method == "DELETE") {
+        r = cli.Delete(path, headers);
     } else {
         std::string payload = body.is_null() ? std::string("{}") : body.dump();
         r = cli.Post(path, headers, payload, "application/json");

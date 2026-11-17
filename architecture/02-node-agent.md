@@ -11,6 +11,7 @@
    - `head` → `llama-server` (head role)
 4. Expose a small, **token-protected** control API that the coordinator calls.
 5. Report the **language runtimes** on its `PATH`, and, only if started with `--allow-exec`, run console programs with them (§9, [ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md)).
+6. **Download model files** from Hugging Face or GitHub releases into its models folder when asked, with pause, resume and cancel (§11, [ADR-011](../adr/ADR-011-model-downloads-on-nodes.md)).
 
 The agent has **no scheduling logic**. It never decides on its own to start or stop inference. It only does what the coordinator tells it.
 
@@ -69,6 +70,9 @@ All endpoints require `X-Cluster-Token` when a token is configured. Request and 
 | GET / PUT | `/agent/settings` | Read or change settings (§10) |
 | GET | `/agent/state` | Registration state, facts and process states for the page |
 | POST | `/agent/register` · `/agent/runtimes/detect` | Re-register now · probe language runtimes again |
+| GET | `/hub/files` | List a Hugging Face repo or GitHub release (§11) |
+| GET / POST | `/downloads` | List download jobs · start one (§11) |
+| POST / DELETE | `/downloads/{id}/pause\|resume\|cancel` · `/downloads/{id}` | Control a download · drop it from the list |
 
 ### 4.1 Command lines the agent builds
 
@@ -106,11 +110,12 @@ llama-server -m <models_dir>/<model_file> --host 0.0.0.0 --port <head_port>
 
 - `model_file` is a path **relative to `--models-dir`**. The agent resolves it and refuses anything outside the models folder, which blocks path traversal ([ADR-005](../adr/ADR-005-model-files-relative-to-models-dir.md)).
 - Without `--allow-exec`, the agent only ever runs the two configured llama.cpp binaries (plus a `--version` probe of each language runtime at startup). With it, it also runs console programs (§9).
+- Downloads (§11) only fetch from Hugging Face model repos and GitHub releases, with URLs the agent builds itself, and only write inside the models folder. An existing file is never overwritten.
 - `extra_args` are passed straight to `llama-server`. They are trusted because the caller holds the cluster token ([06-security.md](06-security.md)).
 
 ## 7. Node facts reported
 
-`node_id`, `hostname`, `ip`, `agent_port`, `rpc_port`, `head_port`, `ram_total`, `ram_available`, `cpu_physical`, `cpu_logical`, `os`, `arch`, `cpu_model`, `disk_free`, `models[]`, `processes{rpc, head}`, `binaries{rpc_server, llama_server}`, `runtimes[]`, `exec_enabled`, `agent_version`.
+`node_id`, `hostname`, `ip`, `agent_port`, `rpc_port`, `head_port`, `ram_total`, `ram_available`, `cpu_physical`, `cpu_logical`, `os`, `arch`, `cpu_model`, `disk_free`, `models[]`, `processes{rpc, head}`, `binaries{rpc_server, llama_server}`, `runtimes[]`, `exec_enabled`, `downloads{available, tool}`, `agent_version`.
 
 ## 8. Running as a service
 
@@ -164,3 +169,19 @@ How a save works:
 4. llama.cpp folder and binary changes apply to the next `/rpc/start` or `/head/start`. Running processes are not touched.
 
 **`allow_exec` can only be turned on locally:** from a loopback address (a browser on the node), with `--allow-exec`, or by editing `xi.yaml`. A remote save that turns it on gets `403`. Turning it off works from anywhere, and takes effect at once.
+
+## 11. Model downloads
+
+[ADR-011](../adr/ADR-011-model-downloads-on-nodes.md). The coordinator's console (Models tab) and `xgi download` start downloads here; the schemas are in [05 §3](05-protocols-and-data.md#model-downloads-adr-011-1).
+
+The agent looks for `curl` on `PATH` at startup (`curl.exe` is part of Windows 10 1803 and later, Linux and macOS) and reports `downloads.available`. Without it, the download endpoints answer `503`.
+
+A job is a source (`huggingface` or `github`), a repo, a ref and up to 64 files:
+
+1. **Starting:** the agent lists the repo once (Hugging Face tree API, or the GitHub release; `latest` resolves to its tag) to learn file sizes and check the files exist. Then it checks there is room on the disk for what is left, plus 256 MB.
+2. **Downloading**, one file at a time: `curl -L --fail -C - -o <target>.part <url>`, supervised like llama.cpp (§5). The agent reads the `.part` file's size four times a second for progress and speed. On success, with the expected size, it renames `.part` to the target. A target that already exists with the same size is skipped (`present`); with another size the job fails rather than overwrite it.
+3. **Failures** (network error, stall under 1 byte/s for 2 minutes, wrong size) retry up to 5 times, 3 s × attempt apart, resuming the `.part` file. Progress resets the count. HTTP 401, 403 and 404 fail at once with a message that names the token variable to set.
+4. **Pause** kills curl and keeps the `.part` file. **Resume** (also of a failed job) starts curl again with `-C -`, which continues with an HTTP Range request. **Cancel** kills curl and deletes the `.part` files of unfinished files. When the agent stops, running jobs are paused; after a restart, starting the same download continues the `.part` file.
+5. After each completed file the agent **re-registers**, so the coordinator's `models` list (and placement) includes the file straight away.
+
+At most 3 jobs download at once per node, and two unfinished jobs can't write the same file. Tokens for gated or private repos come from the agent's environment: `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) and `GITHUB_TOKEN` (or `GH_TOKEN`). The agent passes them to curl in a short-lived header file under `<log_dir>/downloads/`, not on the command line. curl's errors go to `logs/downloads.log`, and each job's steps to `xi.log`.

@@ -39,7 +39,7 @@ struct HttpResult {
     std::string error;   // transport error or non-2xx summary
 };
 
-// One JSON call with a total per-operation timeout. `body` is ignored for GET.
+// One JSON call (GET, POST or DELETE) with a total per-operation timeout. `body` is ignored for GET and DELETE.
 HttpResult http_call(const std::string& method, const std::string& base_url, const std::string& path,
                      const std::string& token, const json& body, double timeout_s);
 

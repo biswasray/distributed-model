@@ -205,6 +205,8 @@
     renderGroups();
     renderDetail();
     renderTargets();
+    renderHubVia();
+    renderHubTargets();
   }
 
   function renderSummary() {
@@ -673,6 +675,8 @@
     for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.view === view);
     $("cluster-view").hidden = view !== "cluster";
     $("config-view").hidden = view !== "config";
+    $("models-view").hidden = view !== "models";
+    if (view === "models") { renderDownloads(); pollDownloads(); }
     if (view !== "cluster" && !$("detail").hidden) closeDetail();
     if (view === "config" && !cfg.loaded) loadConfig();
     const hash = view === "cluster" ? "" : "#" + view;
@@ -902,16 +906,322 @@
     window.addEventListener("beforeunload", (e) => { if (cfg.dirty) e.preventDefault(); });
   }
 
+  // ------------------------------------------------------------------ models: hub listing + downloads (ADR-011)
+
+  const hub = { source: "huggingface", listing: null, selected: new Set(), targets: new Set(), timer: null, jobs: [] };
+  const DL_FAST_MS = 1500, DL_SLOW_MS = 8000;
+
+  function bytes(b) {
+    if (b == null || isNaN(b)) return "?";
+    if (b >= 1e9) return (b / 1e9).toFixed(2) + " GB";
+    if (b >= 1e6) return (b / 1e6).toFixed(1) + " MB";
+    if (b >= 1e3) return Math.round(b / 1e3) + " KB";
+    return b + " B";
+  }
+
+  function eta(s) {
+    if (s == null) return "";
+    s = Math.round(s);
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s";
+    return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+  }
+
+  // A pasted link: huggingface.co/<o>/<r>/(blob|resolve)/<ref>/<path>, huggingface.co/<o>/<r>[/tree/<ref>],
+  // github.com/<o>/<r>/releases/download/<tag>/<name>, github.com/<o>/<r>[/releases/tag/<tag>].
+  function parseHubLink(text) {
+    let u;
+    try { u = new URL(text.trim()); } catch { return null; }
+    const host = u.hostname.replace(/^www\./, "").toLowerCase();
+    const p = u.pathname.split("/").filter(Boolean).map((x) => decodeURIComponent(x));
+    if (p.length < 2) return null;
+    const repo = p[0] + "/" + p[1];
+    if (host === "huggingface.co" || host === "hf.co") {
+      if ((p[2] === "blob" || p[2] === "resolve") && p.length >= 5) return { source: "huggingface", repo, ref: p[3], file: p.slice(4).join("/") };
+      if (p[2] === "tree" && p.length >= 4) return { source: "huggingface", repo, ref: p[3] };
+      return { source: "huggingface", repo, ref: "" };
+    }
+    if (host === "github.com") {
+      if (p[2] === "releases" && p[3] === "download" && p.length === 6) return { source: "github", repo, ref: p[4], file: p[5] };
+      if (p[2] === "releases" && p[3] === "tag" && p.length >= 5) return { source: "github", repo, ref: p[4] };
+      return { source: "github", repo, ref: "" };
+    }
+    return null;
+  }
+
+  function setHubSource(src) {
+    hub.source = src;
+    for (const b of document.querySelectorAll("#hub-src-hf, #hub-src-gh")) b.classList.toggle("active", b.dataset.src === src);
+    $("hub-ref-label").textContent = src === "github" ? "Release tag" : "Branch";
+    $("hub-ref").placeholder = src === "github" ? "latest" : "main";
+    $("hub-repo").placeholder = src === "github" ? "owner/repo  or a https://github.com/…/releases/… link"
+      : "Qwen/Qwen2.5-7B-Instruct-GGUF  or a https://huggingface.co/… link";
+  }
+
+  function downloadNodes() {
+    return state.nodes.filter((n) => n.status === "alive" && !(n.downloads && n.downloads.available === false));
+  }
+
+  function renderHubVia() {
+    const sel = $("hub-via");
+    const keep = sel.value;
+    const nodes = downloadNodes();
+    sel.replaceChildren(...(nodes.length ? nodes.map((n) => h("option", { value: n.node_id, text: n.node_id }))
+      : [h("option", { value: "", text: "no node can download" })]));
+    if (nodes.some((n) => n.node_id === keep)) sel.value = keep;
+    sel.disabled = !nodes.length;
+  }
+
+  function hubStatus(text, cls) {
+    const el = $("hub-status");
+    el.className = "hub-status" + (cls ? " " + cls : "");
+    el.textContent = text || "";
+  }
+
+  // Selecting one part of a split GGUF (…-00001-of-00003.gguf) selects all of its parts.
+  function splitSiblings(path) {
+    const m = /^(.*)-\d{5}-of-(\d{5})\.gguf$/i.exec(path);
+    if (!m || !hub.listing) return [path];
+    return hub.listing.files.map((f) => f.path).filter((p) => { const k = /^(.*)-\d{5}-of-(\d{5})\.gguf$/i.exec(p); return k && k[1] === m[1] && k[2] === m[2]; });
+  }
+
+  function targetPath(file) {
+    const dest = $("hub-dest").value.trim().replace(/^\/+|\/+$/g, "");
+    const name = file.split("/").pop();
+    return dest ? dest + "/" + name : name;
+  }
+
+  function nodeHasAll(n) {
+    if (!hub.selected.size) return false;
+    const models = new Set(n.models || []);
+    return [...hub.selected].every((f) => models.has(targetPath(f)));
+  }
+
+  async function listHubFiles(e) {
+    if (e) e.preventDefault();
+    let repo = $("hub-repo").value.trim(), ref = $("hub-ref").value.trim(), preselect = null;
+    const link = /^https?:\/\//i.test(repo) ? parseHubLink(repo) : null;
+    if (/^https?:\/\//i.test(repo) && !link) return hubStatus("That link is not a Hugging Face or GitHub repository link.", "bad");
+    if (link) {
+      setHubSource(link.source);
+      repo = link.repo;
+      $("hub-repo").value = repo;
+      if (link.ref) { ref = link.ref; $("hub-ref").value = ref; }
+      preselect = link.file || null;
+    }
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) return hubStatus("Enter the repository as owner/name.", "bad");
+    const via = $("hub-via").value;
+    if (!via) return hubStatus("No alive node can download (XI needs curl). Start an agent first.", "bad");
+    hubStatus("Asking " + via + " for the file list…", "busy");
+    $("hub-list").disabled = true;
+    const q = new URLSearchParams({ node_id: via, source: hub.source, repo, ref, all: $("hub-all").checked ? "true" : "false" });
+    const r = await api("GET", "/console/hub/files?" + q.toString());
+    $("hub-list").disabled = false;
+    if (r.status !== 200) {
+      hub.listing = null;
+      $("hub-files-wrap").hidden = $("hub-targets-wrap").hidden = true;
+      return hubStatus(r.error, "bad");
+    }
+    hub.listing = r.json;
+    hub.selected = new Set();
+    if (preselect) {
+      if (!hub.listing.files.some((f) => f.path === preselect)) hub.listing.files.push({ path: preselect, size_bytes: null });
+      for (const p of splitSiblings(preselect)) hub.selected.add(p);
+    } else if (hub.listing.files.length === 1) {
+      hub.selected.add(hub.listing.files[0].path);
+    }
+    const n = hub.listing.files.length;
+    hubStatus(`${hub.source === "github" ? "Release" : "Revision"} ${hub.listing.ref}: ${n} ${$("hub-all").checked ? "" : "GGUF "}file${n === 1 ? "" : "s"}` +
+      (hub.listing.total_files > n ? ` (${hub.listing.total_files} in total; tick "Show all files" to see the rest)` : ""), n ? "ok" : "warn");
+    renderHubFiles();
+    renderHubTargets();
+  }
+
+  function renderHubFiles() {
+    const files = hub.listing ? hub.listing.files : [];
+    $("hub-files-wrap").hidden = !hub.listing;
+    $("hub-files-count").textContent = files.length ? `(${files.length})` : "";
+    $("hub-files").replaceChildren(...(files.length ? files.map((f) => {
+      const cb = h("input", { type: "checkbox", "aria-label": "Select " + f.path });
+      cb.checked = hub.selected.has(f.path);
+      cb.addEventListener("change", () => {
+        for (const p of splitSiblings(f.path)) cb.checked ? hub.selected.add(p) : hub.selected.delete(p);
+        renderHubFiles();
+        renderHubTargets();
+      });
+      const split = /-\d{5}-of-\d{5}\.gguf$/i.test(f.path);
+      return h("tr", { class: hub.selected.has(f.path) ? "sel" : null, onclick: (e) => { if (e.target !== cb) cb.click(); } },
+        h("td", { class: "cb" }, cb),
+        h("td", { class: "mono" }, f.path, split ? h("span", { class: "badge info", text: "split" }) : null),
+        h("td", { class: "num", text: bytes(f.size_bytes) }));
+    }) : [h("tr", null, h("td", { colspan: 3, class: "muted", text: "No matching files in this repository." }))]));
+  }
+
+  function renderHubTargets() {
+    $("hub-targets-wrap").hidden = !hub.listing;
+    if (!hub.listing) return;
+    const nodes = downloadNodes();
+    for (const id of [...hub.targets]) if (!nodes.some((n) => n.node_id === id)) hub.targets.delete(id);
+    const sel = hub.listing.files.filter((f) => hub.selected.has(f.path));
+    const size = sel.reduce((a, f) => a + (f.size_bytes || 0), 0);
+    $("hub-nodes").replaceChildren(...(nodes.length ? nodes.map((n) => {
+      const has = nodeHasAll(n);
+      const tight = n.disk_free != null && size > 0 && n.disk_free < size;
+      const cb = h("input", { type: "checkbox" });
+      cb.checked = hub.targets.has(n.node_id);
+      cb.addEventListener("change", () => { cb.checked ? hub.targets.add(n.node_id) : hub.targets.delete(n.node_id); renderHubTargets(); });
+      return h("label", { class: "hub-node" + (cb.checked ? " sel" : "") }, cb,
+        h("span", { class: "hub-node-name", text: n.node_id }),
+        n.role ? h("span", { class: "badge", text: n.role }) : null,
+        has ? h("span", { class: "badge ok", title: "Already in its models folder", text: "has it" }) : null,
+        h("span", { class: "muted" + (tight ? " bad-text" : ""), title: "Free disk space in the models folder", text: n.disk_free != null ? bytes(n.disk_free) + " free" : "" }));
+    }) : [h("p", { class: "muted", text: "No alive node can download (XI needs curl on PATH)." })]));
+    const k = hub.targets.size;
+    $("hub-summary").textContent = sel.length ? `${sel.length} file${sel.length === 1 ? "" : "s"}, ${bytes(size)}` + (k ? ` → ${k} node${k === 1 ? "" : "s"}` : "")
+      : "Select the files to download.";
+    const btn = $("hub-start");
+    btn.disabled = !sel.length || !k;
+    btn.textContent = k > 1 ? `Download to ${k} nodes` : "Download";
+  }
+
+  async function startDownload() {
+    const files = hub.listing.files.filter((f) => hub.selected.has(f.path)).map((f) => f.path);
+    const body = { node_ids: [...hub.targets], source: hub.source, repo: hub.listing.repo, ref: hub.listing.ref, files };
+    const dest = $("hub-dest").value.trim().replace(/^\/+|\/+$/g, "");
+    if (dest) body.dest_dir = dest;
+    $("hub-start").disabled = true;
+    const r = await api("POST", "/console/downloads", body);
+    renderHubTargets();
+    const started = (r.json && r.json.started) || [];
+    const errors = (r.json && r.json.errors) || [];
+    if (!started.length) return hubStatus((errors.length ? errors.map((e) => e.node_id + ": " + e.error).join("; ") : r.error) || "Download failed.", "bad");
+    hubStatus(`Started on ${started.map((j) => j.node_id).join(", ")}` + (errors.length ? `. Failed on ${errors.map((e) => e.node_id + " (" + e.error + ")").join(", ")}` : "."), errors.length ? "warn" : "ok");
+    hub.jobs = started.concat(hub.jobs);
+    renderDownloads();
+    pollDownloads();
+  }
+
+  function dlStateBadge(st) {
+    const cls = { downloading: "info", starting: "info", completed: "ok", paused: "warn", pausing: "warn", failed: "bad", canceled: "", canceling: "" }[st] || "";
+    return h("span", { class: "badge " + cls, text: st });
+  }
+
+  function renderDownloads() {
+    const jobs = hub.jobs;
+    const running = jobs.filter((j) => ["starting", "downloading", "pausing", "canceling"].includes(j.state)).length;
+    $("dl-count").hidden = !running;
+    $("dl-count").textContent = running ? String(running) : "";
+    if (!$("models-view") || $("models-view").hidden) return;
+    $("dl-list").replaceChildren(...(jobs.length ? jobs.map((j) => {
+      const known = j.total_bytes != null && j.total_bytes > 0;
+      const pct = known ? Math.min(100, (j.done_bytes / j.total_bytes) * 100) : 0;
+      const busy = j.state === "starting" || (j.state === "downloading" && !known);
+      const bar = h("div", { class: "dl-bar" + (busy ? " indeterminate" : "") + " " + j.state, role: "progressbar",
+        "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": known ? Math.round(pct) : null });
+      const fill = h("div", { class: "dl-fill" });
+      fill.style.width = (busy ? 100 : j.state === "completed" ? 100 : pct) + "%";
+      bar.append(fill);
+      const files = j.files || [];
+      const fileText = files.length === 1 ? files[0].target : `${files.length} files (${files.map((f) => f.target.split("/").pop()).slice(0, 3).join(", ")}${files.length > 3 ? ", …" : ""})`;
+      const facts = [];
+      if (j.state === "starting") facts.push("looking up the files…");
+      else facts.push(bytes(j.done_bytes) + (known ? " / " + bytes(j.total_bytes) + " · " + pct.toFixed(1) + "%" : ""));
+      if (j.state === "downloading" && j.speed_bps > 0) facts.push(bytes(j.speed_bps) + "/s");
+      if (j.state === "downloading" && j.eta_s != null) facts.push(eta(j.eta_s) + " left");
+      if (files.length > 1 && j.state === "downloading") facts.push(`file ${j.current_file + 1} of ${files.length}`);
+      if (j.state === "completed" && files.some((f) => f.state === "present")) facts.push("some files were already there");
+      const act = (label, action, cls, title) => h("button", { type: "button", class: "small " + (cls || ""), title,
+        onclick: (e) => downloadAction(j, action, e.currentTarget) }, label);
+      const actions = [];
+      if (["starting", "downloading"].includes(j.state)) actions.push(act("Pause", "pause", "", "Stop for now; the partial file is kept"));
+      if (["paused", "failed"].includes(j.state)) actions.push(act(j.state === "failed" ? "Retry" : "Resume", "resume", "primary", "Continue from where it stopped"));
+      if (["starting", "downloading", "paused", "failed", "pausing"].includes(j.state)) actions.push(act("Cancel", "cancel", "danger", "Stop and delete the partial file"));
+      if (["completed", "failed", "canceled", "paused"].includes(j.state)) actions.push(act("✕", "remove", "ghost", "Remove from the list"));
+      return h("div", { class: "dl-item" },
+        h("div", { class: "dl-head" },
+          h("span", { class: "dl-node", text: j.node_id }),
+          dlStateBadge(j.state),
+          h("span", { class: "dl-file mono", title: files.map((f) => f.target).join("\n"), text: fileText }),
+          ...actions),
+        bar,
+        h("div", { class: "dl-facts muted" },
+          h("span", { text: facts.join(" · ") }),
+          h("span", { class: "spacer" }),
+          h("span", { title: j.source + " " + j.repo + "@" + j.ref, text: (j.source === "github" ? "GitHub " : "HF ") + j.repo + "@" + j.ref })),
+        j.error ? h("div", { class: "dl-error", text: j.error }) : null);
+    }) : [h("p", { class: "empty" }, "No downloads yet. List a repository's files, pick the nodes, and click ", h("b", { text: "Download" }), ".")]));
+  }
+
+  async function downloadAction(j, action, btn) {
+    if (action === "cancel" && !confirm(`Cancel the download on ${j.node_id} and delete its partial file?`)) return;
+    if (btn) btn.disabled = true;
+    const path = "/console/downloads/" + encodeURIComponent(j.node_id) + "/" + j.id + (action === "remove" ? "" : "/" + action);
+    const r = await api(action === "remove" ? "DELETE" : "POST", path, action === "remove" ? undefined : {});
+    if (r.status !== 200) {
+      $("dl-errors").replaceChildren(h("p", { class: "notice-inline", text: j.node_id + ": " + r.error }));
+      if (btn) btn.disabled = false;
+    }
+    pollDownloads();
+  }
+
+  async function clearFinished() {
+    const done = hub.jobs.filter((j) => ["completed", "failed", "canceled"].includes(j.state));
+    await Promise.all(done.map((j) => api("DELETE", "/console/downloads/" + encodeURIComponent(j.node_id) + "/" + j.id)));
+    pollDownloads();
+  }
+
+  async function pollDownloads() {
+    clearTimeout(hub.timer);
+    const r = await api("GET", "/console/downloads");
+    if (r.status === 401) return;  // the token dialog is open; start() polls again
+    if (r.status === 200 && r.json) {
+      hub.jobs = r.json.downloads || [];
+      const errs = r.json.errors || [];
+      $("dl-errors").replaceChildren(...errs.map((e) => h("p", { class: "notice-inline", text: "Cannot read downloads on " + e.node_id + ": " + e.error })));
+      renderDownloads();
+    }
+    const visible = !$("models-view").hidden;
+    const active = hub.jobs.some((j) => ["starting", "downloading", "pausing", "canceling"].includes(j.state));
+    hub.timer = setTimeout(() => pollDownloads(), visible || active ? DL_FAST_MS : DL_SLOW_MS);
+  }
+
+  function initModels() {
+    for (const b of document.querySelectorAll("#hub-src-hf, #hub-src-gh")) b.addEventListener("click", () => {
+      if (hub.source === b.dataset.src) return;
+      setHubSource(b.dataset.src);
+      hub.listing = null;
+      $("hub-ref").value = "";
+      renderHubFiles();
+      renderHubTargets();
+      hubStatus("");
+    });
+    $("hub-form").addEventListener("submit", listHubFiles);
+    $("hub-all").addEventListener("change", () => { if (hub.listing) listHubFiles(); });
+    $("hub-dest").addEventListener("input", renderHubTargets);
+    $("hub-start").addEventListener("click", startDownload);
+    $("hub-pick-all").addEventListener("click", () => { for (const n of downloadNodes()) hub.targets.add(n.node_id); renderHubTargets(); });
+    $("hub-pick-none").addEventListener("click", () => { hub.targets.clear(); renderHubTargets(); });
+    $("hub-pick-missing").addEventListener("click", () => {
+      hub.targets = new Set(downloadNodes().filter((n) => !nodeHasAll(n)).map((n) => n.node_id));
+      renderHubTargets();
+    });
+    $("dl-clear").addEventListener("click", clearFinished);
+  }
+
   // ------------------------------------------------------------------ boot
 
   document.addEventListener("DOMContentLoaded", () => {
     initTokenDialog();
     initConsole();
     initConfig();
+    initModels();
     $("detail-close").addEventListener("click", closeDetail);
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("detail").hidden) closeDetail(); });
     $("node-filter").addEventListener("input", renderNodes);
     $("node-status-filter").addEventListener("change", renderNodes);
-    start().then(() => { if (location.hash === "#config") showView("config"); });
+    start().then(() => {
+      if (location.hash === "#config" || location.hash === "#models") showView(location.hash.slice(1));
+      pollDownloads();
+    });
   });
 })();
