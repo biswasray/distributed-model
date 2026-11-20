@@ -14,6 +14,8 @@
 
 Model downloads ([ADR-011](../adr/ADR-011-model-downloads-on-nodes.md)) need **outbound HTTPS (443)** from the nodes to `huggingface.co` and its CDN, or to `github.com`, `api.github.com` and `objects.githubusercontent.com`. XGI itself needs no internet access.
 
+LAN copies ([ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md)) use the ports above and need no new firewall rule: a node pulls a file from another agent on **8200**, or from XGI on **8100**, with `X-Cluster-Token`.
+
 All control-plane bodies are JSON (`Content-Type: application/json`). Sizes are in **bytes** and times in **seconds** (as floats).
 
 Errors from every component (router, coordinator, agent) use the same body: `{"error": {"message": ..., "type": ..., "code": ...}}` (see §4). A missing or wrong `X-Cluster-Token` gets `401`.
@@ -39,6 +41,7 @@ Errors from every component (router, coordinator, agent) use the same body: `{"e
   "cpu_model": "Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz",
   "disk_free": 214748364800,
   "models": ["Qwen3-30B-A3B-Q4_K_M.gguf"],
+  "model_sizes": {"Qwen3-30B-A3B-Q4_K_M.gguf": 18556686272},
   "processes": { "rpc": {"state": "stopped"}, "head": {"state": "stopped"} },
   "binaries": { "rpc_server": true, "llama_server": true },
   "runtimes": [
@@ -51,7 +54,7 @@ Errors from every component (router, coordinator, agent) use the same body: `{"e
 }
 ```
 
-`agent_version`, `arch`, `cpu_model`, `disk_free` (bytes free on the models dir's drive, or `null`), `binaries`, `runtimes`, `exec_enabled` and `downloads` are optional and informational: the console shows them ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md), [ADR-011](../adr/ADR-011-model-downloads-on-nodes.md)). `downloads.available` is false when the agent found no `curl` on its `PATH`. The coordinator stores the whole body and returns it from `GET /nodes`, and ignores fields it doesn't know.
+`agent_version`, `arch`, `cpu_model`, `disk_free` (bytes free on the models dir's drive, or `null`), `model_sizes`, `binaries`, `runtimes`, `exec_enabled` and `downloads` are optional and informational: the console shows them ([ADR-009](../adr/ADR-009-web-console-and-node-code-execution.md), [ADR-011](../adr/ADR-011-model-downloads-on-nodes.md)). `downloads.available` is false when the agent found no `curl` on its `PATH`. `model_sizes` maps each entry of `models` to its size in bytes. An agent that sends it also serves those files to other nodes (§3, "Model files"), so the coordinator uses it to pick LAN copy sources ([ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md)). The coordinator stores the whole body and returns it from `GET /nodes`, and ignores fields it doesn't know.
 
 `runtimes[].language` is one of `python`, `javascript`, `powershell` (Windows only), `pwsh`, `bash`, `sh` (POSIX only), `cmd` (Windows only), `ruby`, `perl`, `php`, `lua`, `go`, `java`, `c`, `cpp`, `rust`. Only runtimes found on the agent's `PATH` whose version probe succeeds are listed.
 
@@ -219,6 +222,35 @@ The jobs of the XGI machine (`node_id: "@xgi"`) and of every alive node that can
 
 Starts the same download on each node (`node_id` with one string also works). Everything except `node_ids` is sent to the agents as the `POST /downloads` body. Response `200` if at least one node started: `{"started": [<job + node_id>, ...], "errors": [{"node_id", "code", "error"}, ...]}`. If none started, the status is the first error's code and the body also has `error`.
 
+**LAN copy** ([ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md)):
+
+```json
+{"node_ids": ["LAB-PC-08", "LAB-PC-09"], "source": "peer", "peer_node": "auto",
+ "files": ["qwen3/Qwen3-30B-A3B-Q4_K_M.gguf"], "dest_dir": ""}
+```
+
+`source` is `peer` (or `lan`). `files` are paths in the source's models folder. `peer_node` is where the copies come from:
+
+| `peer_node` | Source |
+|---|---|
+| a node id | That node, which must be alive. The coordinator sends its `http://<ip>:<agent_port>` as `peer_url`. |
+| `@xgi` | The XGI machine's `console.models_dir`. Agents get `peer_url: "@xgi"` and use their own coordinator URL. |
+| `auto` (default) | For each target, a source that has every file and isn't the target. First alive nodes not in a group, then the XGI machine, then nodes in a group, spread round robin. Only nodes that report `model_sizes` count. |
+
+A target with no possible source, or that would copy from itself, is listed in `errors` (`404` / `400`). Each started job has `peer`, the source's node id (or `@xgi`).
+
+#### `GET /console/peer/files`
+
+```json
+{"files": [{"path": "qwen3/Qwen3-30B-A3B-Q4_K_M.gguf", "size_bytes": 18556686272, "holders": ["@xgi", "LAB-PC-07"]}]}
+```
+
+Every `.gguf` file that can be copied over the LAN, sorted by path, with the sources that have it: `@xgi` (from `console.models_dir`) and the alive nodes that report `model_sizes`.
+
+#### `GET /models` · `GET /models/file/<path>`
+
+XGI serves `console.models_dir` to agents that copy from `@xgi`, the same way an agent serves its models folder (§3, "Model files"), with at most **4** files sending at once. They need `X-Cluster-Token` and exist only while `console.enabled` is true.
+
 #### `POST /console/downloads/{node_id}/{id}/pause|resume|cancel` · `DELETE /console/downloads/{node_id}/{id}`
 
 Forwarded to the agent; the response is the agent's (plus `node_id`). `404` unknown node · `409` the node is dead · otherwise the agent's status.
@@ -357,6 +389,13 @@ Parameters as for `GET /console/hub/files`. For GitHub, `ref` comes back as the 
  "files": ["qwen2.5-0.5b-instruct-q4_k_m.gguf"], "dest_dir": "qwen05"}
 ```
 
+A LAN copy from another node or the XGI machine ([ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md)):
+
+```json
+{"source": "peer", "peer_url": "http://192.168.1.27:8200", "peer_name": "LAB-PC-07",
+ "files": ["qwen3/Qwen3-30B-A3B-Q4_K_M.gguf"]}
+```
+
 | Field | Rules |
 |---|---|
 | `source` | `huggingface` \| `hf` \| `github` \| `gh` |
@@ -364,16 +403,20 @@ Parameters as for `GET /console/hub/files`. For GitHub, `ref` comes back as the 
 | `ref` | Optional. Branch, tag or commit (1–128 of `A-Z a-z 0-9 . _ - + /`). Default `main` (Hugging Face) or `latest` (GitHub). |
 | `files` | 1–64 paths in the repo (Hugging Face paths may contain `/`; GitHub asset names may not). No `.`/`..` segments, `\`, `:` or control characters. |
 | `dest_dir` | Optional folder under the models folder, same rules. |
+| `peer_url` | `source: "peer"` only. `"@xgi"` (the agent's own coordinator URL), or `http://<IPv4>:<port>` with an address in 10/8, 172.16/12, 192.168/16, 127/8 or 169.254/16. No hostnames, paths or HTTPS. |
+| `peer_name` | Optional, `peer` only: the name shown in the job (default: `peer_url`). At most 128 printable characters. |
 
-Each file is saved as `<models_dir>/<dest_dir>/<file name>` (the repo's folders are dropped, so the parts of a split GGUF stay together), first as `<name>.part`. The `model_file` to use in a pool is the `target` shown in the job.
+For `peer`, `repo` and `ref` are ignored, and `files` are `.gguf` paths in the peer's models folder (folders allowed).
 
-Response `201`: the job (below), in state `starting`. Errors: `400` invalid request · `409` another unfinished job (including a paused one) writes the same file · `429` 3 downloads already running on this node · `503` no `curl`.
+Each file is saved as `<models_dir>/<dest_dir>/<file name>` (the repo's folders are dropped, so the parts of a split GGUF stay together), first as `<name>.part`. A **LAN copy keeps the whole path**: `<models_dir>/<dest_dir>/<path on the peer>`, so the pool's `model_file` is the same on the copy. The `model_file` to use in a pool is the `target` shown in the job.
+
+Response `201`: the job (below), in state `starting`. Errors: `400` invalid request (for `peer`, also `@xgi` on a node with no coordinator URL) · `409` another unfinished job (including a paused one) writes the same file · `429` 3 downloads already running on this node · `503` no `curl`.
 
 **Job:**
 
 ```json
 {"id": "1422550f", "source": "huggingface", "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "ref": "main",
- "dest_dir": "qwen05", "state": "downloading", "error": "",
+ "dest_dir": "qwen05", "peer": null, "peer_url": null, "state": "downloading", "error": "", "note": "",
  "files": [{"path": "qwen2.5-0.5b-instruct-q4_k_m.gguf", "target": "qwen05/qwen2.5-0.5b-instruct-q4_k_m.gguf",
             "size_bytes": 491400032, "done_bytes": 159436800, "state": "downloading"}],
  "current_file": 0, "done_bytes": 159436800, "total_bytes": 491400032, "speed_bps": 16900000.0, "eta_s": 19.6,
@@ -390,7 +433,9 @@ Response `201`: the job (below), in state `starting`. Errors: `400` invalid requ
 | `failed` | See `error`. Resume retries it from where it stopped. |
 | `canceled` | Stopped and the `.part` files deleted |
 
-File `state` is `pending`, `downloading`, `done` or `present`. `total_bytes` and `size_bytes` are `null` if the hub gave no size. A failed transfer is retried 5 times (3 s, 6 s, …), and a stall (under 1 byte/s for 2 minutes) counts as a failure. HTTP 401/403/404 fail at once. A file that would overwrite a different-sized existing file fails. After each completed file the agent re-registers, so the coordinator's `models` list includes it.
+A LAN copy has `source: "peer"`, `repo` and `ref` empty, `peer` (its `peer_name`) and `peer_url` (resolved, so `@xgi` becomes the coordinator's origin). `note` says why a running job is waiting, for example `waiting: LAB-PC-07 is busy sending other copies`, and is otherwise empty.
+
+File `state` is `pending`, `downloading`, `done` or `present`. `total_bytes` and `size_bytes` are `null` if the hub gave no size. A failed transfer is retried 5 times (3 s, 6 s, …), and a stall (under 1 byte/s for 2 minutes) counts as a failure. HTTP 401/403/404 fail at once. For a LAN copy, `429` or `503` from the peer is not a failure: the job sets `note` and tries again every 15 s until the peer has a free slot, or the job is paused or canceled. curl doesn't follow redirects from a peer. A file that would overwrite a different-sized existing file fails. After each completed file the agent re-registers, so the coordinator's `models` list includes it.
 
 #### `GET /downloads`
 
@@ -400,7 +445,13 @@ File `state` is `pending`, `downloading`, `done` or `present`. `total_bytes` and
 
 `pause` (running jobs) and `cancel` (anything not completed) return the job. `resume` takes a `paused` or `failed` job and returns it. `DELETE` removes a job that isn't running from the list (its `.part` files stay, so a paused download can still be resumed by starting it again). Errors: `404` unknown id · `409` wrong state (e.g. resume while still stopping, cancel after completion) · `429` (resume) 3 downloads running.
 
-Gated or private repos need `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) for Hugging Face and `GITHUB_TOKEN` (or `GH_TOKEN`) for GitHub **in the agent's environment**. curl gets the token in a temporary header file, never on its command line. For tests, `XI_HF_BASE`, `XI_GITHUB_BASE` and `XI_GITHUB_API_BASE` replace the hub origins.
+#### Model files (LAN copies, [ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md))
+
+`GET /models` → `{"files": [{"path": "qwen3/Qwen3-30B-A3B-Q4_K_M.gguf", "size_bytes": 18556686272}]}`: the `.gguf` files in the models folder, sorted by path.
+
+`GET /models/file/<path>` sends one of them (`application/octet-stream`), honouring `Range` (`206`), so a receiver's `curl -C -` resumes. `<path>` is percent-encoded per segment. Only complete `.gguf` files that resolve inside the models folder (after symlinks) are served. Errors: `400` not a `.gguf` path inside the folder · `404` no such file · `429` already sending **2** files (`Retry-After: 20`). Every transfer is logged with the receiver's address. Both endpoints need `X-Cluster-Token`, like the rest of the agent API.
+
+Gated or private repos need `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) for Hugging Face and `GITHUB_TOKEN` (or `GH_TOKEN`) for GitHub **in the agent's environment**. curl gets the token in a temporary header file, never on its command line. The same goes for the cluster token on a LAN copy. For tests, `XI_HF_BASE`, `XI_GITHUB_BASE` and `XI_GITHUB_API_BASE` replace the hub origins.
 
 ## 4. Router API
 

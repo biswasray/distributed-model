@@ -113,8 +113,9 @@ std::optional<fs::path> resolve_model_path(const fs::path& models_dir, const std
     return candidate;
 }
 
-std::vector<std::string> scan_models(const fs::path& models_dir) {
-    std::vector<std::string> out;
+namespace {
+std::vector<std::pair<std::string, std::uint64_t>> scan_gguf(const fs::path& models_dir) {
+    std::vector<std::pair<std::string, std::uint64_t>> out;
     std::error_code ec;
     if (!fs::is_directory(models_dir, ec)) return out;
     fs::recursive_directory_iterator it(models_dir, fs::directory_options::skip_permission_denied, ec), end;
@@ -122,9 +123,25 @@ std::vector<std::string> scan_models(const fs::path& models_dir) {
         const auto& p = it->path();
         if (!it->is_regular_file(ec)) continue;
         if (!xgi::ends_with_ci(xgi::path_to_utf8(p.extension()), ".gguf")) continue;
-        out.push_back(xgi::normalize_model_path(xgi::generic_utf8(p.lexically_relative(models_dir))));
+        std::error_code sec;
+        auto size = it->file_size(sec);
+        out.emplace_back(xgi::normalize_model_path(xgi::generic_utf8(p.lexically_relative(models_dir))),
+                         sec ? 0 : static_cast<std::uint64_t>(size));
     }
     std::sort(out.begin(), out.end());
+    return out;
+}
+}  // namespace
+
+std::vector<std::string> scan_models(const fs::path& models_dir) {
+    std::vector<std::string> out;
+    for (auto& [path, size] : scan_gguf(models_dir)) out.push_back(path);
+    return out;
+}
+
+json scan_model_sizes(const fs::path& models_dir) {
+    json out = json::object();
+    for (auto& [path, size] : scan_gguf(models_dir)) out[path] = size;
     return out;
 }
 

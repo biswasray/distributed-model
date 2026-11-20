@@ -47,6 +47,7 @@ Code: `src/common` (config, HTTP, sysinfo), `src/xi` (agent, process supervisor)
 - [ADR-009](adr/ADR-009-web-console-and-node-code-execution.md) Web console and opt-in code execution on nodes
 - [ADR-010](adr/ADR-010-agent-web-page-and-runtime-settings.md) XI web page and runtime settings (xi.yaml)
 - [ADR-011](adr/ADR-011-model-downloads-on-nodes.md) Model downloads onto nodes from Hugging Face and GitHub
+- [ADR-012](adr/ADR-012-lan-model-copies-between-nodes.md) Copying model files between nodes over the LAN
 
 ## Claude skills (`.claude/skills/`)
 

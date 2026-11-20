@@ -8,6 +8,7 @@
 #include <random>
 #include <sstream>
 
+#include "common/http_util.hpp"
 #include "common/log.hpp"
 #include "common/platform.hpp"
 #include "common/util.hpp"
@@ -23,6 +24,7 @@ namespace {
 constexpr double kPollS = 0.25;
 constexpr int kMaxRetries = 5;
 constexpr double kListTimeoutS = 60;
+constexpr int kBusyWaitS = 15;  // a peer answered 429: it is sending its maximum number of files
 
 std::string new_id() {
     static std::atomic<unsigned> counter{0};
@@ -65,12 +67,63 @@ struct CurlRun {
 
 // ------------------------------------------------------------------------------------------ helpers
 
+namespace {
+
+std::string parse_dest_dir(const json& j) {
+    std::string d;
+    if (j.contains("dest_dir") && !j["dest_dir"].is_null()) {
+        if (!j["dest_dir"].is_string()) throw std::invalid_argument("dest_dir must be a string");
+        d = j["dest_dir"];
+        while (!d.empty() && d.back() == '/') d.pop_back();
+        if (!d.empty() && !hub::valid_file_path(d, true))
+            throw std::invalid_argument("dest_dir must be a relative folder inside the models folder");
+    }
+    return d;
+}
+
+// source "peer" (ADR-012): files are .gguf paths in the peer's models folder.
+DownloadRequest peer_request(const json& j) {
+    DownloadRequest r;
+    r.peer = true;
+    const std::string url = j.contains("peer_url") && j["peer_url"].is_string() ? j["peer_url"].get<std::string>() : "";
+    if (url == hub::kXgiPeer) {
+        r.peer_url = url;
+    } else if (auto n = hub::normalize_peer_url(url)) {
+        r.peer_url = *n;
+    } else {
+        throw std::invalid_argument("peer_url must be \"@xgi\" or http://<LAN IPv4 address>:<port> (10.x, 172.16-31.x, "
+                                    "192.168.x, 127.x or 169.254.x)");
+    }
+    if (j.contains("peer_name") && j["peer_name"].is_string()) r.peer_name = j["peer_name"];
+    if (r.peer_name.size() > 128 ||
+        std::any_of(r.peer_name.begin(), r.peer_name.end(), [](char c) { return static_cast<unsigned char>(c) < 0x20; }))
+        throw std::invalid_argument("peer_name must be at most 128 printable characters");
+    if (r.peer_name.empty()) r.peer_name = r.peer_url;
+    r.dest_dir = parse_dest_dir(j);
+    if (!j.contains("files") || !j["files"].is_array() || j["files"].empty())
+        throw std::invalid_argument("files must be a non-empty array of file paths");
+    if (j["files"].size() > DownloadRequest::kMaxFiles)
+        throw std::invalid_argument(std::format("at most {} files per download", DownloadRequest::kMaxFiles));
+    for (const auto& f : j["files"]) {
+        if (!f.is_string() || !hub::valid_file_path(f.get<std::string>(), true) || !hub::is_gguf(f.get<std::string>()))
+            throw std::invalid_argument("invalid file path " + f.dump() + " (a peer copy is a .gguf path in its models folder)");
+        if (std::find(r.files.begin(), r.files.end(), f.get<std::string>()) == r.files.end()) r.files.push_back(f);
+    }
+    return r;
+}
+
+}  // namespace
+
 DownloadRequest DownloadRequest::from_json(const json& j) {
     if (!j.is_object()) throw std::invalid_argument("body must be a JSON object");
+    if (j.contains("source") && j["source"].is_string()) {
+        const std::string s = xgi::to_lower(j["source"].get<std::string>());
+        if (s == "peer" || s == "lan") return peer_request(j);
+    }
     DownloadRequest r;
     auto src = j.contains("source") && j["source"].is_string() ? hub::parse_source(j["source"].get<std::string>())
                                                                  : std::nullopt;
-    if (!src) throw std::invalid_argument("source must be \"huggingface\" or \"github\"");
+    if (!src) throw std::invalid_argument("source must be \"huggingface\", \"github\" or \"peer\"");
     r.source = *src;
     if (!j.contains("repo") || !j["repo"].is_string() || !hub::valid_repo(j["repo"].get<std::string>()))
         throw std::invalid_argument("repo must be \"owner/name\"");
@@ -78,13 +131,7 @@ DownloadRequest DownloadRequest::from_json(const json& j) {
     r.ref = j.contains("ref") && j["ref"].is_string() ? j["ref"].get<std::string>() : "";
     if (r.ref.empty()) r.ref = hub::default_ref(r.source);
     if (!hub::valid_ref(r.ref)) throw std::invalid_argument("ref is not a valid branch, tag or commit");
-    if (j.contains("dest_dir") && !j["dest_dir"].is_null()) {
-        if (!j["dest_dir"].is_string()) throw std::invalid_argument("dest_dir must be a string");
-        r.dest_dir = j["dest_dir"];
-        while (!r.dest_dir.empty() && r.dest_dir.back() == '/') r.dest_dir.pop_back();
-        if (!r.dest_dir.empty() && !hub::valid_file_path(r.dest_dir, true))
-            throw std::invalid_argument("dest_dir must be a relative folder inside the models folder");
-    }
+    r.dest_dir = parse_dest_dir(j);
     if (!j.contains("files") || !j["files"].is_array() || j["files"].empty())
         throw std::invalid_argument("files must be a non-empty array of file paths");
     if (j["files"].size() > kMaxFiles) throw std::invalid_argument(std::format("at most {} files per download", kMaxFiles));
@@ -96,10 +143,11 @@ DownloadRequest DownloadRequest::from_json(const json& j) {
     return r;
 }
 
-std::optional<fs::path> download_target(const fs::path& models_dir, const std::string& dest_dir, const std::string& file) {
+std::optional<fs::path> download_target(const fs::path& models_dir, const std::string& dest_dir, const std::string& file,
+                                        bool keep_dirs) {
     if (!dest_dir.empty() && !hub::valid_file_path(dest_dir, true)) return std::nullopt;
     if (!hub::valid_file_path(file, true)) return std::nullopt;
-    std::string name = file.substr(file.rfind('/') == std::string::npos ? 0 : file.rfind('/') + 1);
+    std::string name = keep_dirs ? file : file.substr(file.rfind('/') == std::string::npos ? 0 : file.rfind('/') + 1);
     fs::path p = models_dir;
     if (!dest_dir.empty()) p /= xgi::path_from_utf8(dest_dir);
     p /= xgi::path_from_utf8(name);
@@ -172,8 +220,11 @@ json Downloads::job_json(const Job& j) const {
                 {"repo", j.repo},
                 {"ref", j.ref},
                 {"dest_dir", j.dest_dir},
+                {"peer", j.peer ? json(j.peer_name) : json(nullptr)},
+                {"peer_url", j.peer ? json(j.peer_url) : json(nullptr)},
                 {"state", j.state},
                 {"error", j.error},
+                {"note", j.note},
                 {"files", files},
                 {"current_file", j.current},
                 {"done_bytes", done},
@@ -214,13 +265,21 @@ json Downloads::start(const DownloadRequest& r) {
     auto j = std::make_shared<Job>();
     j->id = new_id();
     j->src = r.source;
-    j->source = hub::source_name(r.source);
-    j->repo = r.repo;
-    j->ref = r.ref;
+    j->source = r.peer ? "peer" : hub::source_name(r.source);
+    j->repo = r.peer ? "" : r.repo;
+    j->ref = r.peer ? "" : r.ref;
     j->dest_dir = r.dest_dir;
+    j->peer = r.peer;
+    j->peer_name = r.peer_name;
+    j->peer_url = r.peer_url;
+    if (r.peer && r.peer_url == hub::kXgiPeer) {  // the XGI machine: this node's coordinator
+        auto u = xgi::parse_base_url(p.coordinator);
+        if (!u) throw DownloadError(400, "invalid_request", "this machine has no coordinator URL, so it cannot copy from @xgi");
+        j->peer_url = u->origin();
+    }
     j->created_at = j->updated_at = xgi::wall_now();
     for (const auto& f : r.files) {
-        auto t = download_target(p.models_dir, r.dest_dir, f);
+        auto t = download_target(p.models_dir, r.dest_dir, f, r.peer);
         if (!t) throw DownloadError(400, "invalid_request", "invalid file path " + f);
         File file;
         file.path = f;
@@ -248,8 +307,12 @@ json Downloads::start(const DownloadRequest& r) {
     if (running >= kMaxActive)
         throw DownloadError(429, "capacity", std::format("{} downloads are already running on this node", running));
     jobs_[j->id] = j;
-    xgi::log::info("download {}: {} {}@{} -> {} file(s) into {}", j->id, j->source, j->repo, j->ref, j->files.size(),
-                   xgi::path_to_utf8(p.models_dir));
+    if (j->peer)
+        xgi::log::info("download {}: LAN copy from {} ({}) -> {} file(s) into {}", j->id, j->peer_name, j->peer_url,
+                       j->files.size(), xgi::path_to_utf8(p.models_dir));
+    else
+        xgi::log::info("download {}: {} {}@{} -> {} file(s) into {}", j->id, j->source, j->repo, j->ref, j->files.size(),
+                       xgi::path_to_utf8(p.models_dir));
     launch(j);
     prune();
     return job_json(*j);
@@ -261,6 +324,7 @@ void Downloads::launch(const std::shared_ptr<Job>& j) {
     j->error.clear();
     j->finished_at = 0;
     j->speed_bps = 0;
+    j->note.clear();
     j->state = j->listed ? "downloading" : "starting";
     j->running = true;
     j->thread = std::thread([this, j] { run(j); });
@@ -374,11 +438,11 @@ bool Downloads::stop_requested(const std::shared_ptr<Job>& j) {
     return !j->stop.empty();
 }
 
-std::vector<std::string> Downloads::auth_args(hub::Source s, const fs::path& dir, std::string& header_file) const {
-    header_file.clear();
-    std::string token = token_for(s);
-    if (token.empty()) return {};
-    // In a file, not on the command line, so other users can't read it from the process list.
+namespace {
+
+// Writes one header line to a short-lived file curl reads with -H @file: in a file, not on the
+// command line, so other users can't read the secret from the process list.
+std::vector<std::string> header_file_args(const std::string& line, const fs::path& dir, std::string& header_file) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     fs::path p = dir / ("hdr-" + new_id() + ".txt");
@@ -388,16 +452,38 @@ std::vector<std::string> Downloads::auth_args(hub::Source s, const fs::path& dir
     }
     fs::permissions(p, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
     std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    f << "Authorization: Bearer " << token << "\n";
+    f << line << "\n";
     header_file = xgi::path_to_utf8(p);
     return {"-H", "@" + header_file};
 }
 
+}  // namespace
+
+std::vector<std::string> Downloads::auth_args(hub::Source s, const fs::path& dir, std::string& header_file) const {
+    header_file.clear();
+    std::string token = token_for(s);
+    if (token.empty()) return {};
+    return header_file_args("Authorization: Bearer " + token, dir, header_file);
+}
+
+std::vector<std::string> Downloads::auth_args(const Job& j, const fs::path& dir, std::string& header_file) const {
+    header_file.clear();
+    if (!j.peer) return auth_args(j.src, dir, header_file);
+    const std::string token = paths_().token;
+    if (token.empty()) return {};
+    return header_file_args("X-Cluster-Token: " + token, dir, header_file);
+}
+
 namespace {
 
-std::vector<std::string> base_args(const fs::path& curl) {
-    return {xgi::path_to_utf8(curl), "-sS", "-L", "--proto", "=https,http", "--proto-redir", "=https,http",
-            "--connect-timeout", "20", "-A", std::string("xi/") + xgi::kVersion};
+// Hubs redirect to their CDNs. A peer never needs to, and must not: curl would send the cluster
+// token header to wherever the redirect points.
+std::vector<std::string> base_args(const fs::path& curl, bool follow = true) {
+    std::vector<std::string> a{xgi::path_to_utf8(curl), "-sS"};
+    if (follow) a.insert(a.end(), {"-L", "--proto", "=https,http", "--proto-redir", "=https,http"});
+    else a.insert(a.end(), {"--proto", "=http"});
+    a.insert(a.end(), {"--connect-timeout", "20", "-A", std::string("xi/") + xgi::kVersion});
+    return a;
 }
 
 // Runs curl until it exits, `deadline` passes, or `tick` returns false (then it is killed).
@@ -446,31 +532,25 @@ json Downloads::hub_files(hub::Source s, const std::string& repo, const std::str
     if (!hub::valid_ref(ref)) throw DownloadError(400, "invalid_request", "ref is not a valid branch, tag or commit");
     const Paths p = paths_();
     const fs::path dir = p.log_dir / "downloads";
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    const fs::path out = dir / ("list-" + new_id() + ".json");
     std::string hdr;
     auto argv = base_args(curl_);
     auto auth = auth_args(s, dir, hdr);
     argv.insert(argv.end(), auth.begin(), auth.end());
     if (s == hub::Source::github) argv.insert(argv.end(), {"-H", "Accept: application/vnd.github+json"});
     const std::string url = hub::listing_url(bases_, s, repo, ref);
-    argv.insert(argv.end(), {"--max-time", "50", "-o", xgi::path_to_utf8(out), "-w", "%{http_code}\\n", url});
-    CurlRun r = run_curl(argv, p.log_dir / "downloads.log", xgi::mono_now() + kListTimeoutS, nullptr, nullptr);
-    if (!hdr.empty()) fs::remove(xgi::path_from_utf8(hdr), ec);
-    std::string text;
-    {
-        std::ifstream f(out, std::ios::binary);
-        std::stringstream ss;
-        ss << f.rdbuf();
-        text = ss.str();
+    std::pair<int, json> got;
+    try {
+        got = fetch_json(argv, url, p);
+    } catch (...) {
+        std::error_code ec;
+        if (!hdr.empty()) fs::remove(xgi::path_from_utf8(hdr), ec);
+        throw;
     }
-    fs::remove(out, ec);
-    CurlOutcome o = parse_curl_output(r.lines);
-    if (r.timed_out) throw DownloadError(504, "upstream", "the hub did not answer within 60 s");
-    if (!r.exit_code || *r.exit_code != 0)
-        throw DownloadError(502, "upstream", "cannot reach " + url + ": " + (o.error.empty() ? "curl failed" : o.error));
-    json body = json::parse(text, nullptr, false);
+    std::error_code ec;
+    if (!hdr.empty()) fs::remove(xgi::path_from_utf8(hdr), ec);
+    CurlOutcome o;
+    o.http_status = got.first;
+    json& body = got.second;
     if (o.http_status != 200) {
         std::string msg = hub::hub_error_message(body);
         if (msg.empty()) msg = std::format("HTTP {}", o.http_status);
@@ -499,6 +579,68 @@ json Downloads::hub_files(hub::Source s, const std::string& repo, const std::str
     return j;
 }
 
+std::pair<int, json> Downloads::fetch_json(std::vector<std::string> argv, const std::string& url, const Paths& p) {
+    const fs::path dir = p.log_dir / "downloads";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const fs::path out = dir / ("list-" + new_id() + ".json");
+    argv.insert(argv.end(), {"--max-time", "50", "-o", xgi::path_to_utf8(out), "-w", "%{http_code}\\n", url});
+    CurlRun r = run_curl(argv, p.log_dir / "downloads.log", xgi::mono_now() + kListTimeoutS, nullptr, nullptr);
+    std::string text;
+    {
+        std::ifstream f(out, std::ios::binary);
+        std::stringstream ss;
+        ss << f.rdbuf();
+        text = ss.str();
+    }
+    fs::remove(out, ec);
+    CurlOutcome o = parse_curl_output(r.lines);
+    if (r.timed_out) throw DownloadError(504, "upstream", url + " did not answer within 60 s");
+    if (!r.exit_code || *r.exit_code != 0)
+        throw DownloadError(502, "upstream", "cannot reach " + url + ": " + (o.error.empty() ? "curl failed" : o.error));
+    return {o.http_status, json::parse(text, nullptr, false)};
+}
+
+json Downloads::peer_files(const std::string& base, const std::string& token) {
+    const Paths p = paths_();
+    const fs::path dir = p.log_dir / "downloads";
+    std::string hdr;
+    auto argv = base_args(curl_, false);
+    std::vector<std::string> auth;
+    if (!token.empty()) auth = header_file_args("X-Cluster-Token: " + token, dir, hdr);
+    argv.insert(argv.end(), auth.begin(), auth.end());
+    const std::string url = hub::peer_listing_url(base);
+    std::pair<int, json> got;
+    try {
+        got = fetch_json(argv, url, p);
+    } catch (...) {
+        std::error_code ec;
+        if (!hdr.empty()) fs::remove(xgi::path_from_utf8(hdr), ec);
+        throw;
+    }
+    std::error_code ec;
+    if (!hdr.empty()) fs::remove(xgi::path_from_utf8(hdr), ec);
+    const int status = got.first;
+    if (status == 401)
+        throw DownloadError(502, "upstream", "the peer " + base + " rejected the cluster token (HTTP 401): both need the same token");
+    if (status == 404)
+        throw DownloadError(502, "upstream",
+                            "the peer " + base + " does not serve model files (HTTP 404); update XI/XGI there (ADR-012)");
+    if (status != 200) {
+        std::string msg = hub::hub_error_message(got.second.is_object() && got.second.contains("error") &&
+                                                         got.second["error"].is_object()
+                                                     ? got.second["error"]
+                                                     : got.second);
+        throw DownloadError(502, "upstream",
+                            std::format("the peer {} answered HTTP {}{}", base, status, msg.empty() ? "" : ": " + msg));
+    }
+    try {
+        return hub::parse_peer_listing(got.second).to_json();
+    } catch (const std::exception& e) {
+        throw DownloadError(502, "upstream", e.what());
+    }
+}
+
 void Downloads::finish(const std::shared_ptr<Job>& j, const std::string& state, const std::string& error) {
     std::lock_guard lk(mu_);
     j->state = state;
@@ -514,12 +656,14 @@ void Downloads::run(std::shared_ptr<Job> j) {
     try {
         if (!j->listed) {
             // Resolve the ref (GitHub "latest") and learn the sizes; this also checks the files exist.
-            json l = hub_files(j->src, j->repo, j->ref, true);
+            json l = j->peer ? peer_files(j->peer_url, p.token) : hub_files(j->src, j->repo, j->ref, true);
             std::lock_guard lk(mu_);
-            j->ref = l["ref"];
+            if (!j->peer) j->ref = l["ref"];
             for (auto& f : j->files) {
                 auto it = std::find_if(l["files"].begin(), l["files"].end(),
                                        [&](const json& e) { return e["path"] == f.path; });
+                if (it == l["files"].end() && j->peer)
+                    throw DownloadError(404, "not_found", std::format("{} is not in the models folder of {}", f.path, j->peer_name));
                 if (it == l["files"].end())
                     throw DownloadError(404, "not_found", std::format("{} is not in {}@{}", f.path, j->repo, j->ref));
                 if ((*it)["size_bytes"].is_number()) f.size = (*it)["size_bytes"].get<std::uint64_t>();
@@ -610,6 +754,7 @@ void Downloads::run(std::shared_ptr<Job> j) {
     }
     std::lock_guard lk(mu_);
     j->running = false;
+    j->note.clear();
     j->proc.reset();
 }
 
@@ -623,7 +768,7 @@ bool Downloads::download_file(const std::shared_ptr<Job>& j, size_t index, const
         target = f.target;
         size = f.size;
         rel = f.target_rel;
-        url = hub::file_url(bases_, j->src, j->repo, j->ref, f.path);
+        url = j->peer ? hub::peer_file_url(j->peer_url, f.path) : hub::file_url(bases_, j->src, j->repo, j->ref, f.path);
     }
     part = part_of(target);
     auto set_file = [&](const std::function<void(File&)>& fn) {
@@ -675,8 +820,8 @@ bool Downloads::download_file(const std::shared_ptr<Job>& j, size_t index, const
         if (size && have == *size && have > 0) break;  // complete already (e.g. paused right at the end)
 
         std::string hdr;
-        auto argv = base_args(curl_);
-        auto auth = auth_args(j->src, work, hdr);
+        auto argv = base_args(curl_, !j->peer);
+        auto auth = auth_args(*j, work, hdr);
         argv.insert(argv.end(), auth.begin(), auth.end());
         // Abort a stalled transfer (under 1 byte/s for 2 minutes) and resume it below.
         argv.insert(argv.end(), {"--fail", "--speed-limit", "1", "--speed-time", "120", "-C", "-", "-o",
@@ -722,6 +867,27 @@ bool Downloads::download_file(const std::shared_ptr<Job>& j, size_t index, const
             fs::remove(part, ec);  // start over rather than keep a corrupt file
         } else if ((r.exit_code && *r.exit_code == 33) || o.http_status == 416) {
             fs::remove(part, ec);  // server can't resume this file: start it over
+        } else if (j->peer && (o.http_status == 429 || o.http_status == 503)) {
+            // The peer is already sending its maximum number of files: wait for a free slot. This is
+            // not a failure, so it doesn't use up the retries.
+            {
+                std::lock_guard lk(mu_);
+                j->note = std::format("waiting: {} is busy sending other copies", j->peer_name);
+                j->speed_bps = 0;
+            }
+            xgi::log::info("download {}: {} is busy (HTTP {}); waiting {} s", j->id, j->peer_name, o.http_status, kBusyWaitS);
+            const double until = xgi::mono_now() + kBusyWaitS;
+            while (xgi::mono_now() < until)
+                if (stop_requested(j)) return false;
+                else std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::lock_guard lk(mu_);
+            j->note.clear();
+            continue;
+        } else if (j->peer && (o.http_status == 401 || o.http_status == 403)) {
+            return fail(std::format("the peer {} rejected the cluster token (HTTP {}): both need the same token",
+                                    j->peer_name, o.http_status));
+        } else if (j->peer && o.http_status == 404) {
+            return fail(std::format("{} is no longer in the models folder of {} (HTTP 404)", rel, j->peer_name));
         } else if (o.http_status == 401 || o.http_status == 403) {
             return fail(std::format("access denied (HTTP {}) for {}: a gated or private file needs {} in the agent's "
                                     "environment",

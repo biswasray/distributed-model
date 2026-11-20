@@ -163,6 +163,8 @@ A node that comes back after being marked dead gets `404` on its next heartbeat,
 | GET | `/console/hub/files` | console, CLI | List a Hugging Face repo or GitHub release, through a node (§11) |
 | GET / POST | `/console/downloads` | console, CLI | Every node's downloads · start one on one or more nodes (§11) |
 | POST / DELETE | `/console/downloads/{node_id}/{id}[/pause\|resume\|cancel]` | console, CLI | Control or remove one node's download (§11) |
+| GET | `/console/peer/files` | console, CLI | GGUF files on the LAN and which nodes (or `@xgi`) have them (§11) |
+| GET | `/models` · `/models/file/<path>` | agents | `console.models_dir`, for agents copying from `@xgi` (§11) |
 
 Every endpoint except `/health` and the console's static files requires `X-Cluster-Token`. Schemas are in [05-protocols-and-data.md](05-protocols-and-data.md#2-coordinator-api).
 
@@ -210,5 +212,12 @@ xgi download start  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/blob/ma
 xgi download list                                                               # every node
 xgi download pause | resume | cancel | remove LAB-PC-07/1422550f
 ```
+
+**LAN copies** ([ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md)). Source `peer` copies a file that is already on the LAN, from a node or from the XGI machine, so a model crosses the internet only once:
+
+- The console resolves `peer_node` for each target. A node id becomes that node's `http://<ip>:<agent_port>`. `@xgi` is passed through, and the agent uses its own coordinator URL, so XGI doesn't need to know its LAN address. `auto` picks a source that has every file, using the `model_sizes` the agents register: nodes not in a group first, then the XGI machine, then nodes in a group, round robin across the targets. Nobody copies from itself.
+- XGI serves `console.models_dir` at `GET /models` and `/models/file/<path>` on port 8100, behind the token, with up to 4 files at once. The in-process download manager can also receive a copy from a node (`@xgi` as a target).
+- **Models tab:** a third source, **LAN copy**. *Copy from* is *Auto* or a source. **List LAN files** calls `GET /console/peer/files` and shows each file with the number of sources that have it. The rest (targets, *Missing it*, the Downloads list) is the same. A LAN job shows *LAN from <source>*, and the note while it waits for a busy source.
+- **CLI:** `xgi download files peer` lists the files on the LAN. `xgi download start peer <file>... --node N[,N...] [--from NODE|@xgi|auto]` copies them.
 
 `--node @xgi` downloads onto the XGI machine. `start` shows a progress line until the jobs finish (`--detach` returns at once); Ctrl+C pauses them. It finds the coordinator at `--coordinator`, else `http://127.0.0.1:<coordinator.port>` from `cluster.yaml`, and the token at `--token`, else `QWEN_CLUSTER_TOKEN`, else `cluster.yaml`. Exit codes: `0` all completed, `1` a download failed or was canceled, `2` usage error, `130` interrupted (paused).

@@ -135,3 +135,50 @@ TEST_CASE("xi downloads: curl output") {
     CHECK_EQ(xi::parse_curl_output({"200"}).http_status, 200);
     CHECK_EQ(xi::parse_curl_output({"curl: (6) Could not resolve host: x", "000"}).http_status, 0);
 }
+
+TEST_CASE("lan copies: peer URLs stay inside the LAN (ADR-012)") {
+    CHECK(is_lan_ipv4("192.168.1.27") && is_lan_ipv4("10.0.0.1") && is_lan_ipv4("172.16.5.4") && is_lan_ipv4("172.31.255.255"));
+    CHECK(is_lan_ipv4("127.0.0.1") && is_lan_ipv4("169.254.10.1"));
+    CHECK(!is_lan_ipv4("172.32.0.1") && !is_lan_ipv4("8.8.8.8") && !is_lan_ipv4("192.169.0.1") && !is_lan_ipv4("100.64.0.1"));
+    CHECK(!is_lan_ipv4("192.168.1") && !is_lan_ipv4("192.168.1.256") && !is_lan_ipv4("192.168.01.1") && !is_lan_ipv4("lan-pc"));
+    CHECK(!is_lan_ipv4("192.168.1.1.5") && !is_lan_ipv4(""));
+    CHECK_EQ(normalize_peer_url("http://192.168.1.27:8200/").value_or(""), std::string("http://192.168.1.27:8200"));
+    CHECK_EQ(normalize_peer_url("HTTP://127.0.0.1:8100").value_or(""), std::string("http://127.0.0.1:8100"));
+    CHECK(!normalize_peer_url("https://192.168.1.27:8200"));       // agents speak plain http
+    CHECK(!normalize_peer_url("http://192.168.1.27"));             // port required
+    CHECK(!normalize_peer_url("http://192.168.1.27:8200/models")); // no path
+    CHECK(!normalize_peer_url("http://user@192.168.1.27:8200"));
+    CHECK(!normalize_peer_url("http://example.com:8200"));         // no hostnames
+    CHECK(!normalize_peer_url("http://8.8.8.8:80"));               // not the LAN
+    CHECK(!normalize_peer_url("http://192.168.1.27:99999"));
+    CHECK_EQ(peer_listing_url("http://10.0.0.2:8200/"), std::string("http://10.0.0.2:8200/models"));
+    CHECK_EQ(peer_file_url("http://10.0.0.2:8200", "qwen 3/m+1.gguf"),
+             std::string("http://10.0.0.2:8200/models/file/qwen%203/m%2B1.gguf"));
+    auto l = parse_peer_listing(json{{"files", {{{"path", "b.gguf"}, {"size_bytes", 5}}, {{"path", "a/a.gguf"}}}}});
+    REQUIRE(l.files.size() == 2);
+    CHECK_EQ(l.files[0].path, std::string("a/a.gguf"));
+    CHECK(!l.files[0].size);
+    CHECK_EQ(l.files[1].size.value_or(0), std::uint64_t{5});
+    CHECK_THROWS(parse_peer_listing(json::array()));
+}
+
+TEST_CASE("lan copies: peer download requests and targets") {
+    using xi::DownloadRequest;
+    auto r = DownloadRequest::from_json(json{{"source", "peer"}, {"peer_url", "http://192.168.1.21:8200/"}, {"peer_name", "LAB-PC-01"},
+                                             {"files", {"qwen3/Qwen3-30B-A3B-Q4_K_M.gguf"}}});
+    CHECK(r.peer);
+    CHECK_EQ(r.peer_url, std::string("http://192.168.1.21:8200"));
+    CHECK_EQ(r.peer_name, std::string("LAB-PC-01"));
+    auto x = DownloadRequest::from_json(json{{"source", "LAN"}, {"peer_url", "@xgi"}, {"files", {"m.gguf"}}});
+    CHECK(x.peer && x.peer_url == "@xgi" && x.peer_name == "@xgi");
+    CHECK_THROWS(DownloadRequest::from_json(json{{"source", "peer"}, {"files", {"m.gguf"}}}));  // no peer
+    CHECK_THROWS(DownloadRequest::from_json(json{{"source", "peer"}, {"peer_url", "http://1.2.3.4:80"}, {"files", {"m.gguf"}}}));
+    CHECK_THROWS(DownloadRequest::from_json(json{{"source", "peer"}, {"peer_url", "@xgi"}, {"files", {"notes.txt"}}}));
+    CHECK_THROWS(DownloadRequest::from_json(json{{"source", "peer"}, {"peer_url", "@xgi"}, {"files", {"../m.gguf"}}}));
+    // A LAN copy keeps the file's folder, so the pool's model_file is the same on the copy.
+    auto t = xi::download_target("models", "", "qwen3/m.gguf", true);
+    REQUIRE(t.has_value());
+    CHECK_EQ(xgi::generic_utf8(*t), std::string("models/qwen3/m.gguf"));
+    CHECK_EQ(xgi::generic_utf8(*xi::download_target("models", "copies", "qwen3/m.gguf", true)),
+             std::string("models/copies/qwen3/m.gguf"));
+}

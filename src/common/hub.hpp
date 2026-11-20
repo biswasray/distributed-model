@@ -73,6 +73,21 @@ struct HubRef {
 };
 std::optional<HubRef> parse_hub_url(std::string_view url);
 
+// --- LAN copies between nodes (ADR-012)
+
+// The reserved peer name for the XGI machine (the receiving agent uses its own coordinator URL).
+inline constexpr const char* kXgiPeer = "@xgi";
+// True for a dotted IPv4 address in 10/8, 172.16/12, 192.168/16, 127/8 or 169.254/16.
+bool is_lan_ipv4(std::string_view host);
+// "http://<LAN IPv4>:<port>" (a trailing '/' is allowed) -> the normalized origin, else nullopt.
+// No hostnames, userinfo, paths or queries: a peer URL can't point outside the LAN.
+std::optional<std::string> normalize_peer_url(std::string_view url);
+// <base>/models  and  <base>/models/file/<encoded path>
+std::string peer_listing_url(const std::string& base);
+std::string peer_file_url(const std::string& base, const std::string& path);
+// Parses a peer's GET /models reply ({"files": [{"path", "size_bytes"}]}). Throws std::runtime_error.
+Listing parse_peer_listing(const nlohmann::json& body);
+
 // "1.5 GB", "820 MB", "12 KB", "512 B" (decimal units, as in the docs).
 std::string format_bytes(double bytes);
 // "45s", "4m05s", "2h13m".

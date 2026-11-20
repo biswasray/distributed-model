@@ -119,6 +119,7 @@ add_library(xi_lib STATIC
     src/xi/agent.cpp
     src/xi/commands.cpp
     src/xi/downloads.cpp
+    src/xi/model_files.cpp
     src/xi/process.cpp
     src/xi/runtimes.cpp
     src/xi/settings.cpp

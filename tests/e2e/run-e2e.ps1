@@ -311,6 +311,49 @@ spares: 1
     $cliX = & $Xgi download start hf test/mock mock-c.gguf --node '@xgi' --coordinator $coord --token $token 2>&1
     Check ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $WorkDir 'xgi-models\mock-c.gguf'))) "xgi download start --node @xgi downloads onto the XGI server: $(($cliX | Select-Object -Last 1))"
 
+    # --- LAN copies between nodes and from the XGI server (ADR-012)
+    $served = Call GET "$agentC/models" $null $T
+    Check ($served.Status -eq 200 -and @($served.Json.files | Where-Object { $_.path -eq 'mock-a.gguf' -and $_.size_bytes -eq 8000000 }).Count -eq 1) 'agent GET /models lists its GGUF files with sizes'
+    Check ((Call GET "$agentC/models").Status -eq 401) 'agent GET /models needs the cluster token'
+    Check ((Call GET "$agentC/models/file/..%2Fxi-c.yaml" $null $T).Status -in 400, 404) 'agent /models/file refuses a path outside the models folder'
+    Check ((Call GET "$agentC/models/file/mock-a.gguf.part" $null $T).Status -eq 400) 'agent /models/file serves only .gguf files'
+    $rangeOut = Join-Path $WorkDir 'range.bin'
+    $rcode = & curl.exe -s -H "X-Cluster-Token: $token" -r 7999984- -o $rangeOut -w '%{http_code}' "$agentC/models/file/mock-a.gguf"
+    $rb = if (Test-Path $rangeOut) { [IO.File]::ReadAllBytes($rangeOut) } else { @() }
+    Check ($rcode -eq '206' -and $rb.Count -eq 16 -and (0..15 | Where-Object { $rb[$_] -ne ((7999984 + $_) % 251) }).Count -eq 0) "agent /models/file answers a Range request with 206 and the right bytes (HTTP $rcode)"
+    Check ((Call GET "$coord/models" $null $T).Status -eq 200) 'XGI serves console.models_dir at GET /models'
+    $pf = Call GET "$coord/console/peer/files" $null $T
+    $pa = $pf.Json.files | Where-Object { $_.path -eq 'mock-a.gguf' }
+    Check ($pf.Status -eq 200 -and $pa.size_bytes -eq 8000000 -and $pa.holders -contains 'node-c' -and $pa.holders -contains '@xgi') 'GET /console/peer/files lists files on the LAN and who has them'
+    Check ((Call POST "$agentC/downloads" @{ source = 'peer'; peer_url = 'http://8.8.8.8:80'; files = @('mock-a.gguf') } $T).Status -eq 400) 'an agent refuses a peer_url outside the LAN'
+    $self = Call POST "$coord/console/downloads" @{ node_ids = @('node-c'); source = 'peer'; peer_node = 'node-c'; files = @('mock-a.gguf') } $T
+    Check ($self.Status -eq 400) 'a node cannot copy from itself'
+    Check ((Call POST "$coord/console/downloads" @{ node_ids = @('node-a'); source = 'peer'; peer_node = 'auto'; files = @('nobody-has.gguf') } $T).Status -eq 404) 'auto with a file no one has -> 404'
+
+    $lc = Call POST "$coord/console/downloads" @{ node_ids = @('node-a'); source = 'peer'; peer_node = 'node-c'; files = @('mock-a.gguf') } $T
+    $jl = $lc.Json.started[0].id
+    Check ($lc.Status -eq 200 -and $lc.Json.started[0].peer -eq 'node-c' -and $lc.Json.started[0].source -eq 'peer') 'POST /console/downloads starts a LAN copy from node-c'
+    Check (WaitFor { (DlJob 'node-a' $jl).state -eq 'completed' } 30 'lan copy') 'LAN copy completes'
+    $la = Join-Path $WorkDir 'models-a\mock-a.gguf'
+    $okLan = (Test-Path $la) -and (Get-Item $la).Length -eq 8000000
+    if ($okLan) {
+        $fs = [IO.File]::OpenRead($la); $buf = New-Object byte[] 16; [void]$fs.Seek(4000000, 'Begin'); [void]$fs.Read($buf, 0, 16); $fs.Close()
+        $okLan = (0..15 | Where-Object { $buf[$_] -ne ((4000000 + $_) % 251) }).Count -eq 0
+    }
+    Check $okLan 'the LAN copy has the right size and content'
+    Check (WaitFor { (Nodes | Where-Object { $_.node_id -eq 'node-a' }).model_sizes.'mock-a.gguf' -eq 8000000 } 10 'model_sizes') 'the receiver re-registers with model_sizes including the copy'
+
+    $lx2 = Call POST "$coord/console/downloads" @{ node_ids = @('node-b'); source = 'peer'; peer_node = '@xgi'; dest_dir = 'lan'; files = @('mock-c.gguf') } $T
+    $jx2 = $lx2.Json.started[0].id
+    Check ($lx2.Status -eq 200 -and (WaitFor { (DlJob 'node-b' $jx2).state -eq 'completed' } 30 'from xgi') -and (Test-Path (Join-Path $WorkDir 'models-b\lan\mock-c.gguf'))) 'a node copies from the XGI server (@xgi) into a folder'
+    $lxg = Call POST "$coord/console/downloads" @{ node_ids = @('@xgi'); source = 'peer'; peer_node = 'auto'; files = @('mock-gh.gguf') } $T
+    $jxg = $lxg.Json.started[0].id
+    Check ($lxg.Status -eq 200 -and $lxg.Json.started[0].peer -eq 'node-c' -and (WaitFor { (DlJob '%40xgi' $jxg).state -eq 'completed' } 30 'to xgi') -and (Get-Item (Join-Path $WorkDir 'xgi-models\mock-gh.gguf')).Length -eq 500000) 'the XGI server copies from a node (auto picks the only holder)'
+    $cliLan = & $Xgi download start peer mock-gh.gguf --node node-d --coordinator $coord --token $token 2>&1
+    Check ($LASTEXITCODE -eq 0 -and (Get-Item (Join-Path $WorkDir 'models-d\mock-gh.gguf')).Length -eq 500000) "xgi download start peer (CLI, --from auto) copies over the LAN: $(($cliLan | Select-Object -Last 1))"
+    $cliPeerFiles = (& $Xgi download files peer --coordinator $coord --token $token 2>&1) -join "`n"
+    Check ($LASTEXITCODE -eq 0 -and $cliPeerFiles -match 'mock-gh\.gguf') 'xgi download files peer lists the files on the LAN'
+
     # --- failover: kill the worker's agent (its rpc-server dies with it)
     $victim = $pair.workers[0]
     Log "killing agent $victim (worker of pair-0)"

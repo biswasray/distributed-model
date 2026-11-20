@@ -85,3 +85,35 @@ pools:
     CHECK(!e.warnings.empty());
     CHECK_THROWS(parse_config("console: {max_tokens: 0}\n", std::nullopt));
 }
+
+TEST_CASE("console: LAN copy sources (ADR-012)") {
+    auto node = [](const char* id, json sizes, bool in_group = false, const char* status = "alive") {
+        json n{{"node_id", id}, {"status", status}, {"group_id", in_group ? json("g1") : json(nullptr)}};
+        if (!sizes.is_null()) n["model_sizes"] = sizes;
+        return n;
+    };
+    const json m{{"m.gguf", 100}};
+    json nodes = json::array({node("busy", m, true), node("idle1", m), node("idle2", m), node("old", nullptr),
+                              node("dead", m, false, "dead"), node("other", json{{"x.gguf", 1}})});
+    json local{{"m.gguf", 100}, {"x.gguf", 1}};
+
+    auto u = peer_file_union(nodes, local);
+    REQUIRE(u["files"].size() == 2);
+    CHECK_EQ(u["files"][0]["path"].get<std::string>(), std::string("m.gguf"));
+    CHECK_EQ(u["files"][0]["size_bytes"].get<int>(), 100);
+    // @xgi, then the alive nodes that serve files ("old" reports no model_sizes, "dead" is dead)
+    CHECK(u["files"][0]["holders"] == json({"@xgi", "busy", "idle1", "idle2"}));
+
+    // Idle nodes first, then the XGI server, then nodes in a group; spread round robin.
+    auto p = plan_peer_sources({"r1", "r2", "r3", "r4", "r5"}, nodes, local, {"m.gguf"});
+    CHECK_EQ(p["r1"], std::string("idle1"));
+    CHECK_EQ(p["r2"], std::string("idle2"));
+    CHECK_EQ(p["r3"], std::string("@xgi"));
+    CHECK_EQ(p["r4"], std::string("busy"));
+    CHECK_EQ(p["r5"], std::string("idle1"));
+    // A receiver never copies from itself; a file nobody has gets no source.
+    auto self = plan_peer_sources({"idle1"}, nodes, json(nullptr), {"m.gguf"});
+    CHECK_EQ(self["idle1"], std::string("idle2"));
+    CHECK(plan_peer_sources({"r1"}, nodes, local, {"m.gguf", "x.gguf"}).at("r1") == "@xgi");
+    CHECK(plan_peer_sources({"r1"}, nodes, json(nullptr), {"nope.gguf"}).empty());
+}

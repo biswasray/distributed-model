@@ -54,7 +54,7 @@ Never write the token into docs, chat, or committed files.
 
 ## 6. Model files (head candidates only)
 
-Copy the GGUF files into `C:\qwen-cluster\models\` from a USB drive or a wired share. Keep the **file names exactly** as written in the pool's `model_file`.
+Get the GGUF files into `C:\qwen-cluster\models\`: download them from the console's Models tab, copy them from a machine that already has them with **LAN copy** (`xgi download start peer <file> --node <this node>`), or copy them from a USB drive or a wired share. Keep the **file names exactly** as written in the pool's `model_file`.
 
 ## 7. Start the agent at boot 🔒
 

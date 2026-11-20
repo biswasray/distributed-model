@@ -122,16 +122,17 @@
       <div class="seg" role="group" aria-label="Source">
         <button type="button" class="seg-btn active" id="hub-src-hf" data-src="huggingface">Hugging Face</button>
         <button type="button" class="seg-btn" id="hub-src-gh" data-src="github">GitHub release</button>
+        <button type="button" class="seg-btn" id="hub-src-lan" data-src="peer" title="Copy a file another node (or the XGI server) already has, over the LAN">LAN copy</button>
       </div>
     </div>
     <form class="hub-form" id="hub-form">
-      <label class="grow">Repository or file link
+      <label class="grow" id="hub-repo-field">Repository or file link
         <input type="text" id="hub-repo" placeholder="Qwen/Qwen2.5-7B-Instruct-GGUF  or a https://huggingface.co/… link" spellcheck="false" autocomplete="off" required>
       </label>
-      <label class="narrow-field"><span id="hub-ref-label">Branch</span>
+      <label class="narrow-field" id="hub-ref-field"><span id="hub-ref-label">Branch</span>
         <input type="text" id="hub-ref" placeholder="main" spellcheck="false" autocomplete="off">
       </label>
-      <label class="narrow-field">Look up from
+      <label class="narrow-field"><span id="hub-via-label">Look up from</span>
         <select id="hub-via" title="The node that queries the hub. Downloads run on each target node."></select>
       </label>
       <button type="submit" class="primary" id="hub-list">List files</button>
@@ -141,7 +142,7 @@
       <div class="hub-files" id="hub-files-wrap" hidden>
         <div class="hub-sub">
           <h3>Files <span class="muted" id="hub-files-count"></span></h3>
-          <label class="check small-text"><input type="checkbox" id="hub-all"> Show all files</label>
+          <label class="check small-text" id="hub-all-field"><input type="checkbox" id="hub-all"> Show all files</label>
         </div>
         <div class="table-wrap hub-files-table">
           <table>

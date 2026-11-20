@@ -73,6 +73,7 @@ All endpoints require `X-Cluster-Token` when a token is configured. Request and 
 | GET | `/hub/files` | List a Hugging Face repo or GitHub release (§11) |
 | GET / POST | `/downloads` | List download jobs · start one (§11) |
 | POST / DELETE | `/downloads/{id}/pause\|resume\|cancel` · `/downloads/{id}` | Control a download · drop it from the list |
+| GET | `/models` · `/models/file/<path>` | List this node's GGUF files with sizes · send one to another node (§12) |
 
 ### 4.1 Command lines the agent builds
 
@@ -110,7 +111,8 @@ llama-server -m <models_dir>/<model_file> --host 0.0.0.0 --port <head_port>
 
 - `model_file` is a path **relative to `--models-dir`**. The agent resolves it and refuses anything outside the models folder, which blocks path traversal ([ADR-005](../adr/ADR-005-model-files-relative-to-models-dir.md)).
 - Without `--allow-exec`, the agent only ever runs the two configured llama.cpp binaries (plus a `--version` probe of each language runtime at startup). With it, it also runs console programs (§9).
-- Downloads (§11) only fetch from Hugging Face model repos and GitHub releases, with URLs the agent builds itself, and only write inside the models folder. An existing file is never overwritten.
+- Downloads (§11) only fetch from Hugging Face model repos and GitHub releases, with URLs the agent builds itself, or from another cluster machine on a private IPv4 address (LAN copy, fixed paths only). They only write inside the models folder. An existing file is never overwritten.
+- The agent serves only complete `.gguf` files inside its models folder to other nodes (§12), and only with the token.
 - `extra_args` are passed straight to `llama-server`. They are trusted because the caller holds the cluster token ([06-security.md](06-security.md)).
 
 ## 7. Node facts reported
@@ -185,3 +187,22 @@ A job is a source (`huggingface` or `github`), a repo, a ref and up to 64 files:
 5. After each completed file the agent **re-registers**, so the coordinator's `models` list (and placement) includes the file straight away.
 
 At most 3 jobs download at once per node, and two unfinished jobs can't write the same file. Tokens for gated or private repos come from the agent's environment: `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) and `GITHUB_TOKEN` (or `GH_TOKEN`). The agent passes them to curl in a short-lived header file under `<log_dir>/downloads/`, not on the command line. curl's errors go to `logs/downloads.log`, and each job's steps to `xi.log`.
+
+**LAN copies** ([ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md)). A job with source `peer` copies `.gguf` files from another node, or from the XGI machine, instead of a hub. It works the same way, with these differences:
+
+- The listing step calls `GET <peer>/models`, and each file comes from `GET <peer>/models/file/<path>`. Both carry `X-Cluster-Token` in a header file. curl doesn't follow redirects, so the token can't leak to another host.
+- `peer_url` must be `@xgi` (meaning this agent's `coordinator` URL) or `http://<private IPv4>:<port>`. The console resolves node ids and `auto` for the operator (03 §11).
+- The file keeps its folder: `<models_dir>/<dest_dir>/<path on the peer>`.
+- A busy peer (`429`) isn't a failure. The job shows a `note` and tries again every 15 s.
+
+## 12. Serving model files to other nodes
+
+[ADR-012](../adr/ADR-012-lan-model-copies-between-nodes.md). Every agent serves its models folder read-only, so other nodes can copy a model over the LAN instead of downloading it again (§11, "LAN copies"):
+
+- `GET /models` lists the `.gguf` files under `--models-dir` with their sizes. The same list goes to the coordinator as `model_sizes` in `/register`.
+- `GET /models/file/<path>` sends one file and honours HTTP `Range`, so the receiver resumes after a pause, a Wi-Fi drop or a restart. The file is read in 1 MiB chunks; nothing is held in RAM.
+- Only complete `.gguf` files that resolve inside the models folder are served (the same check as `model_file`, [ADR-005](../adr/ADR-005-model-files-relative-to-models-dir.md)). `.part` files and anything outside the folder are refused.
+- At most **2** files are sent at once. Another request gets `429` with `Retry-After: 20`, which keeps the load on a head that is also running llama.cpp bounded. Each transfer is logged in `xi.log` with the receiver's address and the bytes sent.
+- Both endpoints need `X-Cluster-Token`, like the rest of the agent API, and use port 8200. No extra firewall rule is needed.
+
+Schemas are in [05 §3](05-protocols-and-data.md#model-files-lan-copies-adr-012).

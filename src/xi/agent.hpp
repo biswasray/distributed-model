@@ -16,6 +16,7 @@
 
 #include "common/util.hpp"
 #include "xi/downloads.hpp"
+#include "xi/model_files.hpp"
 #include "xi/process.hpp"
 #include "xi/runtimes.hpp"
 #include "xi/settings.hpp"
@@ -74,6 +75,7 @@ private:
     void setup_routes();
     void setup_ui_routes();
     void setup_download_routes();
+    static constexpr size_t kMaxUploads = 2;  // model files sent to other nodes at once (ADR-012)
     void on_get_settings(const httplib::Request&, httplib::Response&);
     void on_put_settings(const httplib::Request&, httplib::Response&);
     void control_loop();
@@ -113,6 +115,7 @@ private:
     std::atomic<int> exec_jobs_{0};
 
     std::unique_ptr<Downloads> downloads_;  // model downloads (ADR-011)
+    std::unique_ptr<ModelServer> model_server_;  // serves the models folder for LAN copies (ADR-012)
 };
 
 }  // namespace xi

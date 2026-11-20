@@ -23,7 +23,8 @@ namespace xgi {
 
 namespace {
 
-const char* kDownloadUsage = R"(xgi download - download model files onto nodes, from Hugging Face or GitHub releases
+const char* kDownloadUsage = R"(xgi download - get model files onto nodes: from Hugging Face, GitHub releases, or
+                another node over the LAN
 
 Usage:
   xgi download files  <hf|github> <owner/repo> --node N [--ref R] [--all]
@@ -36,6 +37,12 @@ Usage:
         progress. Ctrl+C pauses; --detach returns at once. A URL is a Hugging Face
         .../blob/<ref>/<file> or .../resolve/<ref>/<file> link, or a GitHub
         .../releases/download/<tag>/<file> link.
+  xgi download files  peer
+        List the GGUF files already on the LAN (on the nodes and the XGI server) and who has them.
+  xgi download start  peer <file>... --node N[,N...] [--from NODE|@xgi|auto] [--dest DIR] [--detach]
+        Copy files over the LAN from another node or the XGI server (ADR-012) instead of the
+        internet. <file> is its path in the source's models folder, and is kept on the copy.
+        --from auto (the default) spreads the copies over every source that has the files.
   xgi download list   [--node N]                List downloads on every node (or one)
   xgi download watch  <node>/<id>...            Show progress until they finish
   xgi download pause  <node>/<id>...            Stop; the partial file stays for resume
@@ -65,6 +72,16 @@ struct JobRef {
 };
 
 bool terminal(const std::string& s) { return s == "completed" || s == "failed" || s == "canceled"; }
+
+std::string job_source(const nlohmann::json& j) {
+    if (j.value("source", "") == "peer") return "LAN copy from " + j.value("peer", "?");
+    return std::format("{} {}@{}", j.value("source", ""), j.value("repo", ""), j.value("ref", ""));
+}
+
+bool is_peer_source(const std::string& s) {
+    const std::string l = to_lower(s);
+    return l == "peer" || l == "lan";
+}
 
 std::string err_text(const HttpResult& r) {
     if (r.status == 0) return "coordinator unreachable: " + r.error;
@@ -103,7 +120,7 @@ std::map<std::string, nlohmann::json> fetch_jobs(const Conn& c, const std::vecto
 
 void print_job_summary(const std::string& key, const nlohmann::json& j) {
     std::string state = j.value("state", "?");
-    std::string what = std::format("{} {}@{}", j.value("source", ""), j.value("repo", ""), j.value("ref", ""));
+    std::string what = job_source(j);
     std::cout << std::format("{}  {}  {}  {}", key, state, hub::format_bytes(num(j, "done_bytes")), what);
     if (!j.value("error", "").empty()) std::cout << "\n    error: " << j.value("error", "");
     std::cout << "\n";
@@ -212,8 +229,8 @@ int run_download_cli(int argc, char** argv) {
         std::cout << kDownloadUsage;
         return pos.empty() && !args.has("--help") && !args.has("-h") ? 2 : 0;
     }
-    if (auto bad = args.unknown({"--coordinator", "--token", "--config", "--node", "--ref", "--dest", "--all", "--detach",
-                                 "--help", "-h"});
+    if (auto bad = args.unknown({"--coordinator", "--token", "--config", "--node", "--ref", "--dest", "--from", "--all",
+                                 "--detach", "--help", "-h"});
         !bad.empty()) {
         std::cerr << "xgi download: unknown option " << bad.front() << "\n\n" << kDownloadUsage;
         return 2;
@@ -263,6 +280,24 @@ int run_download_cli(int argc, char** argv) {
         return !out.empty();
     };
 
+    if (cmd == "files" && pos.size() == 1 && is_peer_source(pos[0])) {
+        auto r = http_call("GET", c.url, "/console/peer/files", c.token, nullptr, 20);
+        if (!r.ok) {
+            std::cerr << "xgi download: " << err_text(r) << "\n";
+            return 1;
+        }
+        const auto files = r.body.value("files", nlohmann::json::array());
+        std::cout << std::format("{} GGUF file(s) on the LAN\n", files.size());
+        for (const auto& f : files) {
+            std::vector<std::string> holders;
+            for (const auto& h : f.value("holders", nlohmann::json::array())) holders.push_back(h.get<std::string>());
+            std::cout << std::format("  {:>10}  {}\n              on {}\n",
+                                     f["size_bytes"].is_number() ? hub::format_bytes(f["size_bytes"].get<double>()) : "?",
+                                     f.value("path", ""), join(holders, ", "));
+        }
+        return 0;
+    }
+
     if (cmd == "files") {
         if (pos.size() != 2 || !args.has("--node")) {
             std::cerr << "usage: xgi download files <hf|github> <owner/repo> --node N [--ref R] [--all]\n";
@@ -295,7 +330,13 @@ int run_download_cli(int argc, char** argv) {
 
     if (cmd == "start") {
         nlohmann::json body;
-        if (pos.size() == 1) {
+        if (pos.size() >= 2 && is_peer_source(pos[0])) {
+            body = {{"source", "peer"}, {"peer_node", args.get_or("--from", "auto")},
+                    {"files", std::vector<std::string>(pos.begin() + 1, pos.end())}};
+        } else if (args.has("--from")) {
+            std::cerr << "xgi download: --from is only for LAN copies:  xgi download start peer <file>... --from NODE\n";
+            return 2;
+        } else if (pos.size() == 1) {
             auto ref = hub::parse_hub_url(pos[0]);
             if (!ref) {
                 std::cerr << "xgi download: not a Hugging Face file link or GitHub release asset link: " << pos[0] << "\n";
@@ -329,7 +370,7 @@ int run_download_cli(int argc, char** argv) {
         if (r.body.is_object()) {
             for (const auto& j : r.body.value("started", nlohmann::json::array())) {
                 refs.push_back({j.value("node_id", ""), j.value("id", "")});
-                std::cout << "started " << refs.back().key() << "  " << j.value("repo", "") << " -> "
+                std::cout << "started " << refs.back().key() << "  " << job_source(j) << " -> "
                           << j.value("files", nlohmann::json::array()).size() << " file(s)\n";
             }
             for (const auto& e : r.body.value("errors", nlohmann::json::array()))
@@ -358,9 +399,10 @@ int run_download_cli(int argc, char** argv) {
             std::string files;
             for (const auto& f : j.value("files", nlohmann::json::array()))
                 files += (files.empty() ? "" : ", ") + f.value("target", "");
-            std::cout << std::format("{}/{}  {:<11} {}  {} {}@{}\n    {}\n", j.value("node_id", ""), j.value("id", ""),
+            std::cout << std::format("{}/{}  {:<11} {}  {}\n    {}\n", j.value("node_id", ""), j.value("id", ""),
                                      j.value("state", ""), progress_line(j, 0).substr(j.value("node_id", "").size()),
-                                     j.value("source", ""), j.value("repo", ""), j.value("ref", ""), files);
+                                     job_source(j), files);
+            if (!j.value("note", "").empty()) std::cout << "    " << j.value("note", "") << "\n";
             if (!j.value("error", "").empty()) std::cout << "    error: " << j.value("error", "") << "\n";
         }
         for (const auto& e : r.body.value("errors", nlohmann::json::array()))

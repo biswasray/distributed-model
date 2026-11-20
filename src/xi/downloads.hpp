@@ -4,6 +4,7 @@
 // folder, with the system curl (Windows 10+, Linux and macOS ship it), so XI needs no TLS library.
 // A file downloads to <target>.part and is renamed when complete. Pause stops curl and keeps the
 // .part file; resume (or a new download of the same file) continues it with an HTTP Range request.
+// Source "peer" copies a GGUF file from another node or the XGI machine over the LAN (ADR-012).
 #pragma once
 
 #include <cstdint>
@@ -39,13 +40,19 @@ struct DownloadRequest {
     xgi::hub::Source source = xgi::hub::Source::huggingface;
     std::string repo, ref, dest_dir;
     std::vector<std::string> files;
+    // source "peer": copy from `peer_url` (a LAN http://<ip>:<port>), or from the XGI machine when
+    // `peer_url` is "@xgi" (the agent's own coordinator URL). `peer_name` is shown in the job.
+    bool peer = false;
+    std::string peer_url, peer_name;
     static constexpr size_t kMaxFiles = 64;
     static DownloadRequest from_json(const json& j);  // throws std::invalid_argument
 };
 
 // Where `file` (a repo path) is saved: <models_dir>/<dest_dir>/<file name>. Only the file name
-// is kept, so the parts of a split GGUF land next to each other. nullopt if it would escape.
-std::optional<fs::path> download_target(const fs::path& models_dir, const std::string& dest_dir, const std::string& file);
+// is kept, so the parts of a split GGUF land next to each other. With `keep_dirs` (peer copies)
+// the whole relative path is kept, so the pool's model_file works on the copy. nullopt if it would escape.
+std::optional<fs::path> download_target(const fs::path& models_dir, const std::string& dest_dir, const std::string& file,
+                                        bool keep_dirs = false);
 
 // Reads curl's output: the HTTP status printed by -w "%{http_code}" and its "curl: (N) ..." error line.
 struct CurlOutcome {
@@ -58,6 +65,8 @@ class Downloads {
 public:
     struct Paths {
         fs::path models_dir, log_dir;
+        std::string token;        // X-Cluster-Token for peer copies
+        std::string coordinator;  // what the peer "@xgi" means ("" on the XGI machine itself)
     };
     static constexpr size_t kMaxActive = 3;   // jobs downloading at once
     static constexpr size_t kMaxKept = 50;    // finished jobs are dropped beyond this
@@ -96,6 +105,9 @@ private:
     struct Job {
         std::string id, source, repo, ref, dest_dir;
         xgi::hub::Source src = xgi::hub::Source::huggingface;
+        bool peer = false;
+        std::string peer_url, peer_name;
+        std::string note;                // why a running job is waiting (a busy peer), or empty
         std::vector<File> files;
         std::string state = "starting";  // starting | downloading | pausing | paused | completed | failed | canceled
         std::string error;
@@ -114,7 +126,11 @@ private:
     void run(std::shared_ptr<Job> j);
     bool download_file(const std::shared_ptr<Job>& j, size_t index, const Paths& paths);  // false = stopped or failed
     void finish(const std::shared_ptr<Job>& j, const std::string& state, const std::string& error);
+    std::vector<std::string> auth_args(const Job& j, const fs::path& dir, std::string& header_file) const;
     std::vector<std::string> auth_args(xgi::hub::Source s, const fs::path& dir, std::string& header_file) const;
+    json peer_files(const std::string& base, const std::string& token);  // GET <peer>/models; throws DownloadError
+    // Runs curl -o <tmp> for a small JSON reply; returns {http status, body}. Throws DownloadError.
+    std::pair<int, json> fetch_json(std::vector<std::string> argv, const std::string& url, const Paths& p);
     bool stop_requested(const std::shared_ptr<Job>& j);
     void prune();  // under mu_
 

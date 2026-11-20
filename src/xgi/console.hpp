@@ -8,15 +8,18 @@
 #include <httplib.h>
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "common/config.hpp"
 
 namespace xi {
 class Downloads;
+class ModelServer;
 }
 
 namespace xgi {
@@ -50,13 +53,33 @@ private:
     void on_downloads_list(const httplib::Request&, httplib::Response&);
     void on_downloads_start(const httplib::Request&, httplib::Response&);
     void on_download_action(const httplib::Request&, httplib::Response&, const std::string& action);
-    nlohmann::json local_info();  // {"node_id", "available", "tool", "models_dir", "disk_free", "models"}
+    void on_peer_files(const httplib::Request&, httplib::Response&);  // LAN copies (ADR-012)
+    // {"node_id", "available", "tool", "models_dir", "disk_free", "models", "model_sizes"}
+    nlohmann::json local_info();
 
     const ClusterConfig& startup_;
     ConfigStore& store_;
     Coordinator& coord_;
     std::unique_ptr<xi::Downloads> local_;  // downloads onto this machine
+    std::unique_ptr<xi::ModelServer> served_;  // console.models_dir served to agents for LAN copies
 };
+
+// --- LAN copies (ADR-012)
+
+// Model files XGI sends to agents at once.
+inline constexpr size_t kXgiMaxUploads = 4;
+
+// Every .gguf file the LAN can copy: {"files": [{"path", "size_bytes", "holders": [node ids, "@xgi"]}]}.
+// `nodes` is GET /nodes; only alive nodes that report model_sizes (agents that serve files) count.
+// `local_sizes` is the XGI machine's {"path": size} (or null).
+nlohmann::json peer_file_union(const nlohmann::json& nodes, const nlohmann::json& local_sizes);
+
+// For source "auto": for each receiver, a node id (or "@xgi") that has every file in `files`, not the
+// receiver itself. Sources not in a group come first, then the XGI machine, then nodes in a group;
+// receivers are spread round robin. A receiver with no possible source is left out of the result.
+std::map<std::string, std::string> plan_peer_sources(const std::vector<std::string>& receivers,
+                                                     const nlohmann::json& nodes, const nlohmann::json& local_sizes,
+                                                     const std::vector<std::string>& files);
 
 // --- pure helpers (unit-tested)
 

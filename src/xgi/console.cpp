@@ -14,6 +14,7 @@
 #include "xgi/ui_assets.hpp"
 #include "xi/commands.hpp"
 #include "xi/downloads.hpp"
+#include "xi/model_files.hpp"
 
 namespace xgi {
 
@@ -128,6 +129,67 @@ std::string mime_type(std::string_view path) {
     return "application/octet-stream";
 }
 
+// LAN copies (ADR-012). A node can serve files when it reports model_sizes (XI 0.3+).
+namespace {
+
+bool can_serve(const json& n) {
+    return n.is_object() && n.value("status", "") == "alive" && n.contains("model_sizes") && n["model_sizes"].is_object();
+}
+
+bool has_all(const json& sizes, const std::vector<std::string>& files) {
+    if (!sizes.is_object() || files.empty()) return false;
+    return std::all_of(files.begin(), files.end(), [&](const std::string& f) { return sizes.contains(f); });
+}
+
+}  // namespace
+
+json peer_file_union(const json& nodes, const json& local_sizes) {
+    std::map<std::string, std::pair<json, std::vector<std::string>>> by_path;  // path -> (size, holders)
+    auto add = [&](const std::string& holder, const json& sizes) {
+        if (!sizes.is_object()) return;
+        for (auto& [path, size] : sizes.items()) {
+            auto& e = by_path[path];
+            if (e.first.is_null() && size.is_number()) e.first = size;
+            e.second.push_back(holder);
+        }
+    };
+    add(Console::kLocalNode, local_sizes);
+    if (nodes.is_array())
+        for (const auto& n : nodes)
+            if (can_serve(n)) add(n.value("node_id", ""), n["model_sizes"]);
+    json files = json::array();
+    for (auto& [path, e] : by_path) files.push_back({{"path", path}, {"size_bytes", e.first}, {"holders", e.second}});
+    return json{{"files", files}};
+}
+
+std::map<std::string, std::string> plan_peer_sources(const std::vector<std::string>& receivers, const json& nodes,
+                                                     const json& local_sizes, const std::vector<std::string>& files) {
+    struct Source {
+        std::string id;
+        int rank;  // 0 not in a group, 1 the XGI machine, 2 in a group
+        int load = 0;
+    };
+    std::vector<Source> sources;
+    if (nodes.is_array())
+        for (const auto& n : nodes)
+            if (can_serve(n) && has_all(n["model_sizes"], files))
+                sources.push_back({n.value("node_id", ""), n.contains("group_id") && n["group_id"].is_string() ? 2 : 0});
+    if (has_all(local_sizes, files)) sources.push_back({Console::kLocalNode, 1});
+    std::stable_sort(sources.begin(), sources.end(), [](const Source& a, const Source& b) { return a.rank < b.rank; });
+    std::map<std::string, std::string> out;
+    for (const auto& r : receivers) {
+        Source* best = nullptr;
+        for (auto& s : sources) {
+            if (s.id == r) continue;
+            if (!best || s.load < best->load || (s.load == best->load && s.rank < best->rank)) best = &s;
+        }
+        if (!best) continue;
+        ++best->load;
+        out[r] = best->id;
+    }
+    return out;
+}
+
 // ------------------------------------------------------------------------------------------ routes
 
 Console::Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& coordinator, std::filesystem::path log_dir)
@@ -135,9 +197,12 @@ Console::Console(const ClusterConfig& startup, ConfigStore& store, Coordinator& 
     if (!startup_.console.enabled) return;
     local_ = std::make_unique<xi::Downloads>(
         [this, log_dir] {
-            return xi::Downloads::Paths{path_from_utf8(store_.current()->console.models_dir), log_dir};
+            return xi::Downloads::Paths{path_from_utf8(store_.current()->console.models_dir), log_dir,
+                                        startup_.cluster_token, ""};
         },
         nullptr);
+    served_ = std::make_unique<xi::ModelServer>(
+        [this] { return path_from_utf8(store_.current()->console.models_dir); }, kXgiMaxUploads);
 }
 
 Console::~Console() {
@@ -158,7 +223,8 @@ json Console::local_info() {
                 {"tool", tool["tool"]},
                 {"models_dir", path_to_utf8(abs)},
                 {"disk_free", ec ? json(nullptr) : json(space.available)},
-                {"models", xi::scan_models(dir)}};
+                {"models", xi::scan_models(dir)},
+                {"model_sizes", xi::scan_model_sizes(dir)}};
 }
 
 bool Console::is_public_path(const std::string& path) {
@@ -190,6 +256,9 @@ void Console::register_routes(httplib::Server& s) {
            [this](const httplib::Request& q, httplib::Response& r) { on_download_action(q, r, q.matches[3]); });
     s.Delete(R"(/console/downloads/([^/]+)/([0-9a-f]+))",
              [this](const httplib::Request& q, httplib::Response& r) { on_download_action(q, r, "remove"); });
+    s.Get("/console/peer/files", [this](auto& q, auto& r) { on_peer_files(q, r); });
+    // console.models_dir, for agents that copy from "@xgi" (ADR-012): GET /models, /models/file/<path>
+    served_->register_routes(s);
 }
 
 void Console::on_info(const httplib::Request&, httplib::Response& res) {
@@ -451,11 +520,81 @@ void Console::on_downloads_start(const httplib::Request& req, httplib::Response&
     agent_body.erase("node_id");
 
     json started = json::array(), errors = json::array();
+    // LAN copies (ADR-012): "peer_node" names the source (a node id, "@xgi" or "auto"). Each receiver
+    // gets its own body with the resolved peer_url.
+    const std::string src_name = agent_body.contains("source") && agent_body["source"].is_string()
+                                     ? to_lower(agent_body["source"].get<std::string>())
+                                     : "";
+    const bool peer = src_name == "peer" || src_name == "lan";
+    std::map<std::string, json> bodies;
+    if (peer) {
+        std::string from = agent_body.contains("peer_node") && agent_body["peer_node"].is_string()
+                               ? agent_body["peer_node"].get<std::string>()
+                               : "auto";
+        if (from.empty()) from = "auto";
+        agent_body.erase("peer_node");
+        agent_body.erase("peer_url");
+        agent_body.erase("peer_name");
+        agent_body["source"] = "peer";
+        std::vector<std::string> files;
+        if (agent_body.contains("files") && agent_body["files"].is_array())
+            for (const auto& f : agent_body["files"])
+                if (f.is_string()) files.push_back(f);
+        std::map<std::string, std::string> plan;
+        if (from == "auto") {
+            plan = plan_peer_sources(ids, coord_.nodes_json(), xi::scan_model_sizes(path_from_utf8(store_.current()->console.models_dir)),
+                                     files);
+        } else {
+            for (const auto& id : ids) plan[id] = from;
+        }
+        std::vector<std::string> keep;
+        for (const auto& id : ids) {
+            auto it = plan.find(id);
+            auto skip = [&](int code, const std::string& msg) { errors.push_back({{"node_id", id}, {"code", code}, {"error", msg}}); };
+            if (it == plan.end()) {
+                skip(404, "no other node (or the XGI server) has all of the selected files");
+                continue;
+            }
+            const std::string& src = it->second;
+            if (src == id) {
+                skip(400, "a node can't copy from itself");
+                continue;
+            }
+            json b = agent_body;
+            if (src == kLocalNode) {
+                b["peer_url"] = kLocalNode;  // the agent uses its own coordinator URL
+            } else {
+                auto n = coord_.node_record(src);
+                if (!n) {
+                    skip(404, "unknown source node " + src);
+                    continue;
+                }
+                if (n->value("status", "") != "alive") {
+                    skip(409, "source node " + src + " is dead");
+                    continue;
+                }
+                b["peer_url"] = agent_url(*n);
+            }
+            b["peer_name"] = src;
+            bodies[id] = std::move(b);
+            keep.push_back(id);
+        }
+        ids = keep;
+        if (ids.empty()) {
+            int status = errors.at(0).value("code", 400);
+            return reply_json(res, status,
+                              json{{"started", started},
+                                   {"errors", errors},
+                                   {"error", error_body(status, errors.at(0).value("error", std::string("failed")), "invalid_request")["error"]}});
+        }
+    }
+    auto body_for = [&](const std::string& id) -> const json& { return peer ? bodies.at(id) : agent_body; };
+
     std::vector<std::pair<std::string, std::future<HttpResult>>> calls;
     for (const auto& id : ids) {
         if (id == kLocalNode) {
             try {
-                json j = local_->start(xi::DownloadRequest::from_json(agent_body));
+                json j = local_->start(xi::DownloadRequest::from_json(body_for(id)));
                 j["node_id"] = id;
                 started.push_back(j);
             } catch (const xi::DownloadError& e) {
@@ -475,8 +614,9 @@ void Console::on_downloads_start(const httplib::Request& req, httplib::Response&
             continue;
         }
         std::string url = agent_url(*n), token = startup_.cluster_token;
-        calls.emplace_back(id, std::async(std::launch::async, [url, token, agent_body] {
-                               return http_call("POST", url, "/downloads", token, agent_body, 15);
+        json b = body_for(id);
+        calls.emplace_back(id, std::async(std::launch::async, [url, token, b] {
+                               return http_call("POST", url, "/downloads", token, b, 15);
                            }));
     }
     for (auto& [id, f] : calls) {
@@ -493,12 +633,18 @@ void Console::on_downloads_start(const httplib::Request& req, httplib::Response&
     }
     const size_t nfiles = agent_body.contains("files") && agent_body["files"].is_array() ? agent_body["files"].size() : 0;
     log::info("console: download {} {} ({} file(s)) requested by {} on [{}]: {} started, {} failed",
-              agent_body.value("source", std::string("?")), agent_body.value("repo", std::string("?")), nfiles,
-              req.remote_addr, join(ids, ", "), started.size(), errors.size());
+              agent_body.value("source", std::string("?")), peer ? std::string("(LAN copy)") : agent_body.value("repo", std::string("?")),
+              nfiles, req.remote_addr, join(ids, ", "), started.size(), errors.size());
     int status = started.empty() ? errors.at(0).value("code", 502) : 200;
     json out{{"started", started}, {"errors", errors}};
     if (started.empty()) out["error"] = error_body(status, errors.at(0).value("error", std::string("failed")), "upstream")["error"];
     reply_json(res, status, out);
+}
+
+// GET /console/peer/files : every .gguf file that can be copied over the LAN, with who has it.
+void Console::on_peer_files(const httplib::Request&, httplib::Response& res) {
+    reply_json(res, 200, peer_file_union(coord_.nodes_json(),
+                                         xi::scan_model_sizes(path_from_utf8(store_.current()->console.models_dir))));
 }
 
 // POST /console/downloads/{node_id}/{id}/(pause|resume|cancel), DELETE /console/downloads/{node_id}/{id}

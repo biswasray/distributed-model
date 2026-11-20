@@ -45,6 +45,9 @@ std::optional<fs::path> resolve_model_path(const fs::path& models_dir, const std
 // All *.gguf files under models_dir (recursive), relative, '/'-separated, sorted.
 std::vector<std::string> scan_models(const fs::path& models_dir);
 
+// The same files with their sizes in bytes: {"<relative path>": size}. Reported as model_sizes (ADR-012).
+json scan_model_sizes(const fs::path& models_dir);
+
 // Program + args for a binary. A ".py" binary runs as `python <script> args...` (python3 on POSIX).
 std::vector<std::string> program_argv(const fs::path& bin, const std::vector<std::string>& args);
 

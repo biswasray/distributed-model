@@ -194,6 +194,61 @@ std::optional<HubRef> parse_hub_url(std::string_view url) {
     return r;
 }
 
+bool is_lan_ipv4(std::string_view host) {
+    int oct[4];
+    size_t i = 0;
+    for (int k = 0; k < 4; ++k) {
+        if (k > 0) {
+            if (i >= host.size() || host[i] != '.') return false;
+            ++i;
+        }
+        size_t start = i;
+        int v = 0;
+        while (i < host.size() && host[i] >= '0' && host[i] <= '9' && i - start < 3) v = v * 10 + (host[i++] - '0');
+        if (i == start || v > 255 || (i - start > 1 && host[start] == '0')) return false;
+        oct[k] = v;
+    }
+    if (i != host.size()) return false;
+    return oct[0] == 10 || oct[0] == 127 || (oct[0] == 172 && oct[1] >= 16 && oct[1] <= 31) ||
+           (oct[0] == 192 && oct[1] == 168) || (oct[0] == 169 && oct[1] == 254);
+}
+
+std::optional<std::string> normalize_peer_url(std::string_view url) {
+    constexpr std::string_view scheme = "http://";
+    if (url.size() <= scheme.size() || to_lower(std::string(url.substr(0, scheme.size()))) != scheme) return std::nullopt;
+    std::string rest(url.substr(scheme.size()));
+    if (!rest.empty() && rest.back() == '/') rest.pop_back();
+    size_t colon = rest.find(':');
+    if (colon == std::string::npos) return std::nullopt;
+    std::string host = rest.substr(0, colon), port = rest.substr(colon + 1);
+    if (!is_lan_ipv4(host) || port.empty() || port.size() > 5) return std::nullopt;
+    if (!std::all_of(port.begin(), port.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;
+    int p = std::stoi(port);
+    if (p < 1 || p > 65535) return std::nullopt;
+    return std::format("http://{}:{}", host, p);
+}
+
+std::string peer_listing_url(const std::string& base) { return trim_slash(base) + "/models"; }
+
+std::string peer_file_url(const std::string& base, const std::string& path) {
+    return trim_slash(base) + "/models/file/" + encode_path(path);
+}
+
+Listing parse_peer_listing(const nlohmann::json& body) {
+    if (!body.is_object() || !body.contains("files") || !body["files"].is_array())
+        throw std::runtime_error("unexpected reply from the peer (expected a model file list)");
+    Listing l;
+    for (const auto& e : body["files"]) {
+        if (!e.is_object() || !e.contains("path") || !e["path"].is_string()) continue;
+        HubFile f{e["path"].get<std::string>(), std::nullopt};
+        if (e.contains("size_bytes") && e["size_bytes"].is_number_integer() && e["size_bytes"].get<long long>() >= 0)
+            f.size = e["size_bytes"].get<std::uint64_t>();
+        l.files.push_back(std::move(f));
+    }
+    std::sort(l.files.begin(), l.files.end(), [](const HubFile& a, const HubFile& b) { return a.path < b.path; });
+    return l;
+}
+
 std::string format_bytes(double b) {
     if (b < 0) b = 0;
     if (b >= 1e9) return std::format("{:.2f} GB", b / 1e9);

@@ -301,9 +301,10 @@ Download GGUF files **only to head nodes**. Workers receive their slices over RP
 Two ways to get them there:
 
 - **From XGI (needs internet access on the nodes):** in the web console's **Models** tab, or with `xgi download`, pick the repo and file, and the nodes download straight into their models folder, with progress, pause, resume and cancel (§12.3). Use **Missing it** to pick only the nodes that don't have the file yet.
+- **Over the LAN (recommended for many heads):** download the file once, onto the XGI server or one node, then use **LAN copy** in the Models tab (or `xgi download start peer …`) to copy it to the other heads (§12.3). The internet link carries it only once.
 - **By hand:** download once to a USB drive or a wired machine and copy the files into `C:\qwen-cluster\models` on the head nodes.
 
-Either way, don't have 16 heads download the same 18 GB file over Wi-Fi at once: start a few at a time, or copy by hand.
+Don't have 16 heads download the same 18 GB file from the internet at once: download it once and copy it over the LAN, a few nodes at a time.
 
 ### 7.5 Install the cluster services
 
@@ -499,6 +500,7 @@ Plain-text completion, passed through to the head node.
 | GET | `/ui/` | Web console (§12.1). No token needed to load the page. |
 | POST | `/console/generate` · `/console/exec` | Console: generate code with a pool, run code on a node |
 | GET / POST | `/console/hub/files` · `/console/downloads` | Console and `xgi download`: list a Hugging Face repo or GitHub release; start, list and control model downloads on nodes (§12.3) |
+| GET | `/console/peer/files` | GGUF files already on the LAN and which machines have them, for LAN copies (§12.3) |
 
 All coordinator endpoints except `/health` and the console page need the header `X-Cluster-Token`. Full schemas are in [architecture/05-protocols-and-data.md](architecture/05-protocols-and-data.md).
 
@@ -608,6 +610,14 @@ XGI can also download onto **its own machine**, even with no agents running: pic
 
 When a file completes, the node re-registers and the coordinator knows it has the model, so you can deploy a pool that uses it. Use the `target` path the list shows (e.g. `qwen2.5-7b/qwen2.5-7b-instruct-q4_k_m.gguf`) as the pool's `model_file`.
 
+**Copying a model that is already on the LAN** ([ADR-012](adr/ADR-012-lan-model-copies-between-nodes.md)). With 16 heads, downloading the 18.6 GB default model 16 times would move about 300 GB over the internet link. Download it once instead, ideally onto the XGI server (usually wired), then:
+
+1. Choose **LAN copy** and click **List LAN files**. You see every GGUF file on the nodes and the XGI server, with the number of machines that have it (*on 3*).
+2. *Copy from* **Auto** spreads the copies over every machine that has the file, preferring idle nodes, then the XGI server, then nodes running a model. Or pick one source, such as **XGI server**.
+3. Tick the file and the targets (**Missing it**), then click **Download**. The file keeps its folder (`qwen3/Qwen3-30B-A3B-Q4_K_M.gguf` stays `qwen3/…`), so the pool's `model_file` works as it is.
+
+Each machine sends at most 2 files at once (the XGI server 4). Extra targets wait and show *waiting: … is busy*. On Wi-Fi a copy uses the air twice (sender to access point to receiver), so copy to a few nodes, then use **Auto** again: the new copies become sources too.
+
 **From the command line** (on the coordinator machine, or anywhere with `--coordinator`):
 
 ```powershell
@@ -616,6 +626,8 @@ xgi download start hf Qwen/Qwen2.5-7B-Instruct-GGUF qwen2.5-7b-instruct-q4_k_m.g
 xgi download start https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/blob/main/qwen2.5-7b-instruct-q4_k_m.gguf --node LAB-PC-07
 xgi download list
 xgi download pause  LAB-PC-07/1422550f      # also: resume, cancel, remove
+xgi download files peer                                                     # GGUF files on the LAN, and who has them
+xgi download start peer qwen3/Qwen3-30B-A3B-Q4_K_M.gguf --node LAB-PC-08,LAB-PC-09 --from auto   # or --from @xgi / LAB-PC-07
 ```
 
 `start` shows a progress bar until the downloads finish; **Ctrl+C pauses them** (resume later with `xgi download resume`), and `--detach` returns at once. For GitHub, use `github` and a release asset name; `--ref` picks a release tag (default: the latest release). `xgi download --help` lists every option.
@@ -637,7 +649,7 @@ Stop-ScheduledTask -TaskName QwenNodeAgent; Start-ScheduledTask -TaskName QwenNo
 - Allow those ports only on the **Private** firewall profile, and preferably only from cluster IPs (`-RemoteAddress 192.168.1.0/24`).
 - If the router must be reachable more widely, put it behind a reverse proxy with authentication (an API key) and HTTPS.
 - Prompts and responses travel unencrypted on the LAN. Don't send sensitive data unless the network is secured.
-- Model downloads only come from Hugging Face repos and GitHub releases, into the models folder, and never overwrite a file. A node's `HF_TOKEN` stays on that node.
+- Model downloads only come from Hugging Face repos and GitHub releases, or from another cluster machine on a private address (LAN copy). They go into the models folder and never overwrite a file. A node's `HF_TOKEN` stays on that node. Every agent serves its GGUF files to holders of the cluster token on port 8200.
 - Keep the web console's code execution off (`console.allow_exec: false`) unless you need it. When it's on, the cluster token lets its holder run code on every node started with `--allow-exec` (§12.1).
 
 ---
@@ -680,6 +692,7 @@ Get-Process rpc-server, llama-server                 # is it running?
 ### Possible improvements
 
 - **Speculative decoding:** a small Qwen draft model on the head proposes tokens that the big model checks in batches. This can give 1.5–2× speed on the 72B pool.
+- **Verified copies:** check each download and LAN copy against the hub's SHA-256, so a corrupt file can't spread from node to node.
 - **Pre-sharding:** copy each worker's slice ahead of time (USB or wired) so the first deployment skips the Wi-Fi transfer.
 - **Prompt caching** at the router, so repeated system prompts are reused.
 - **Wired backbone:** even a cheap gigabit switch for the head nodes greatly reduces latency.

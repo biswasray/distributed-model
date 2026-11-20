@@ -951,9 +951,18 @@
     return null;
   }
 
+  // "peer": copy a file that another node or the XGI server already has, over the LAN (ADR-012).
   function setHubSource(src) {
     hub.source = src;
-    for (const b of document.querySelectorAll("#hub-src-hf, #hub-src-gh")) b.classList.toggle("active", b.dataset.src === src);
+    const lan = src === "peer";
+    for (const b of document.querySelectorAll("#hub-src-hf, #hub-src-gh, #hub-src-lan")) b.classList.toggle("active", b.dataset.src === src);
+    $("hub-repo-field").hidden = $("hub-ref-field").hidden = $("hub-all-field").hidden = lan;
+    $("hub-repo").required = !lan;
+    $("hub-via-label").textContent = lan ? "Copy from" : "Look up from";
+    $("hub-via").title = lan ? "Where the targets copy the files from. Auto spreads the copies over every node that has them."
+      : "The node that queries the hub. Downloads run on each target node.";
+    $("hub-list").textContent = lan ? "List LAN files" : "List files";
+    renderHubVia();
     $("hub-ref-label").textContent = src === "github" ? "Release tag" : "Branch";
     $("hub-ref").placeholder = src === "github" ? "latest" : "main";
     $("hub-repo").placeholder = src === "github" ? "owner/repo  or a https://github.com/…/releases/… link"
@@ -971,9 +980,24 @@
     return out.concat(state.nodes.filter((n) => n.status === "alive" && !(n.downloads && n.downloads.available === false)));
   }
 
+  // Sources for a LAN copy: the XGI server and alive nodes that serve their models folder.
+  function lanSources() {
+    const out = [];
+    const l = hub.local;
+    if (l && l.model_sizes && Object.keys(l.model_sizes).length) out.push({ node_id: LOCAL });
+    return out.concat(state.nodes.filter((n) => n.status === "alive" && n.model_sizes && Object.keys(n.model_sizes).length));
+  }
+
   function renderHubVia() {
     const sel = $("hub-via");
     const keep = sel.value;
+    if (hub.source === "peer") {
+      const opts = [h("option", { value: "auto", text: "Auto (spread)" })].concat(lanSources().map((n) => h("option", { value: n.node_id, text: nodeLabel(n.node_id) })));
+      sel.replaceChildren(...opts);
+      sel.value = opts.some((o) => o.value === keep) ? keep : "auto";
+      sel.disabled = false;
+      return;
+    }
     const nodes = downloadNodes();
     sel.replaceChildren(...(nodes.length ? nodes.map((n) => h("option", { value: n.node_id, text: nodeLabel(n.node_id) }))
       : [h("option", { value: "", text: "no node can download" })]));
@@ -996,7 +1020,7 @@
 
   function targetPath(file) {
     const dest = $("hub-dest").value.trim().replace(/^\/+|\/+$/g, "");
-    const name = file.split("/").pop();
+    const name = hub.listing && hub.listing.peer ? file : file.split("/").pop();  // a LAN copy keeps its folders
     return dest ? dest + "/" + name : name;
   }
 
@@ -1006,8 +1030,30 @@
     return [...hub.selected].every((f) => models.has(targetPath(f)));
   }
 
+  async function listLanFiles() {
+    const from = $("hub-via").value || "auto";
+    hubStatus("Collecting the GGUF files on the LAN…", "busy");
+    $("hub-list").disabled = true;
+    const r = await api("GET", "/console/peer/files");
+    $("hub-list").disabled = false;
+    if (r.status !== 200) {
+      hub.listing = null;
+      $("hub-files-wrap").hidden = $("hub-targets-wrap").hidden = true;
+      return hubStatus(r.error, "bad");
+    }
+    const files = (r.json.files || []).filter((f) => from === "auto" || (f.holders || []).includes(from));
+    hub.listing = { peer: true, from, repo: "", ref: "", files };
+    hub.selected = new Set(files.length === 1 ? [files[0].path] : []);
+    const n = files.length;
+    hubStatus(n ? `${n} GGUF file${n === 1 ? "" : "s"} ${from === "auto" ? "on the LAN" : "on " + nodeLabel(from)}. The copies keep the file's folder.`
+      : (from === "auto" ? "No node or XGI server has a GGUF file yet. Download one from Hugging Face or GitHub first." : nodeLabel(from) + " has no GGUF files."), n ? "ok" : "warn");
+    renderHubFiles();
+    renderHubTargets();
+  }
+
   async function listHubFiles(e) {
     if (e) e.preventDefault();
+    if (hub.source === "peer") return listLanFiles();
     let repo = $("hub-repo").value.trim(), ref = $("hub-ref").value.trim(), preselect = null;
     const link = /^https?:\/\//i.test(repo) ? parseHubLink(repo) : null;
     if (/^https?:\/\//i.test(repo) && !link) return hubStatus("That link is not a Hugging Face or GitHub repository link.", "bad");
@@ -1061,7 +1107,8 @@
       const split = /-\d{5}-of-\d{5}\.gguf$/i.test(f.path);
       return h("tr", { class: hub.selected.has(f.path) ? "sel" : null, onclick: (e) => { if (e.target !== cb) cb.click(); } },
         h("td", { class: "cb" }, cb),
-        h("td", { class: "mono" }, f.path, split ? h("span", { class: "badge info", text: "split" }) : null),
+        h("td", { class: "mono" }, f.path, split ? h("span", { class: "badge info", text: "split" }) : null,
+          f.holders ? h("span", { class: "badge", title: "On " + f.holders.map(nodeLabel).join(", "), text: "on " + f.holders.length }) : null),
         h("td", { class: "num", text: bytes(f.size_bytes) }));
     }) : [h("tr", null, h("td", { colspan: 3, class: "muted", text: "No matching files in this repository." }))]));
   }
@@ -1096,7 +1143,8 @@
 
   async function startDownload() {
     const files = hub.listing.files.filter((f) => hub.selected.has(f.path)).map((f) => f.path);
-    const body = { node_ids: [...hub.targets], source: hub.source, repo: hub.listing.repo, ref: hub.listing.ref, files };
+    const body = hub.listing.peer ? { node_ids: [...hub.targets], source: "peer", peer_node: hub.listing.from, files }
+      : { node_ids: [...hub.targets], source: hub.source, repo: hub.listing.repo, ref: hub.listing.ref, files };
     const dest = $("hub-dest").value.trim().replace(/^\/+|\/+$/g, "");
     if (dest) body.dest_dir = dest;
     $("hub-start").disabled = true;
@@ -1140,6 +1188,7 @@
       if (j.state === "downloading" && j.eta_s != null) facts.push(eta(j.eta_s) + " left");
       if (files.length > 1 && j.state === "downloading") facts.push(`file ${j.current_file + 1} of ${files.length}`);
       if (j.state === "completed" && files.some((f) => f.state === "present")) facts.push("some files were already there");
+      if (j.note) facts.push(j.note);
       const act = (label, action, cls, title) => h("button", { type: "button", class: "small " + (cls || ""), title,
         onclick: (e) => downloadAction(j, action, e.currentTarget) }, label);
       const actions = [];
@@ -1157,7 +1206,8 @@
         h("div", { class: "dl-facts muted" },
           h("span", { text: facts.join(" · ") }),
           h("span", { class: "spacer" }),
-          h("span", { title: j.source + " " + j.repo + "@" + j.ref, text: (j.source === "github" ? "GitHub " : "HF ") + j.repo + "@" + j.ref })),
+          j.source === "peer" ? h("span", { title: "LAN copy from " + (j.peer_url || ""), text: "LAN from " + nodeLabel(j.peer || "?") })
+            : h("span", { title: j.source + " " + j.repo + "@" + j.ref, text: (j.source === "github" ? "GitHub " : "HF ") + j.repo + "@" + j.ref })),
         j.error ? h("div", { class: "dl-error", text: j.error }) : null);
     }) : [h("p", { class: "empty" }, "No downloads yet. List a repository's files, pick the nodes, and click ", h("b", { text: "Download" }), ".")]));
   }
@@ -1199,7 +1249,7 @@
   }
 
   function initModels() {
-    for (const b of document.querySelectorAll("#hub-src-hf, #hub-src-gh")) b.addEventListener("click", () => {
+    for (const b of document.querySelectorAll("#hub-src-hf, #hub-src-gh, #hub-src-lan")) b.addEventListener("click", () => {
       if (hub.source === b.dataset.src) return;
       setHubSource(b.dataset.src);
       hub.listing = null;
@@ -1209,6 +1259,7 @@
       hubStatus("");
     });
     $("hub-form").addEventListener("submit", listHubFiles);
+    $("hub-via").addEventListener("change", () => { if (hub.source === "peer" && hub.listing) listLanFiles(); });
     $("hub-all").addEventListener("change", () => { if (hub.listing) listHubFiles(); });
     $("hub-dest").addEventListener("input", renderHubTargets);
     $("hub-start").addEventListener("click", startDownload);

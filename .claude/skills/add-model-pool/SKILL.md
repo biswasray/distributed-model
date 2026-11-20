@@ -23,7 +23,7 @@ A pool = one model name that clients choose with `model`, served by `groups` gro
      context: 4096
    ```
    Pools are filled **in order**, so put the most important one first.
-5. **Model staging note.** Tell the operator how many head nodes need the GGUF file (at least `groups` + 1 spare) and the file size. Recommend copying by USB or a wired connection.
+5. **Model staging note.** Tell the operator how many head nodes need the GGUF file (at least `groups` + 1 spare) and the file size. Recommend downloading it once (onto the XGI server or one head) and copying it to the other heads with a LAN copy (Models tab → **LAN copy**, or `xgi download start peer <file> --node …`, [ADR-012](../../../adr/ADR-012-lan-model-copies-between-nodes.md)), or by USB or a wired connection.
 6. **Update the docs** (search for the old pool names to find every reference):
    - `distributed-qwen-cluster.md`: §3.2 sizing table, §4 options, §7.4 download table, §8 config example, §11 performance table
    - `architecture/05-protocols-and-data.md`: config example (only if the schema changed)

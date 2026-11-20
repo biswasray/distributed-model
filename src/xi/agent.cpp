@@ -59,9 +59,10 @@ Agent::Agent(AgentBoot boot)
     downloads_ = std::make_unique<Downloads>(
         [this] {
             auto snap = snapshot();
-            return Downloads::Paths{snap.r.models_dir, xgi::path_from_utf8(snap.s.log_dir)};
+            return Downloads::Paths{snap.r.models_dir, xgi::path_from_utf8(snap.s.log_dir), snap.token, snap.s.coordinator};
         },
         [this] { reregister_ = true; });  // the coordinator learns about the new model file
+    model_server_ = std::make_unique<ModelServer>([this] { return snapshot().r.models_dir; }, kMaxUploads);
     setup_routes();
 }
 
@@ -108,6 +109,9 @@ json Agent::facts(const Snapshot& snap) {
     std::error_code ec;
     auto space = fs::space(snap.r.models_dir, ec);
     bool space_ok = !ec;
+    json sizes = scan_model_sizes(snap.r.models_dir);
+    json models = json::array();
+    for (auto& [path, size] : sizes.items()) models.push_back(path);
     return json{
         {"node_id", snap.r.name},
         {"hostname", xgi::sysinfo::hostname()},
@@ -123,7 +127,8 @@ json Agent::facts(const Snapshot& snap) {
         {"arch", std::string(xgi::kArchName)},
         {"cpu_model", xgi::sysinfo::cpu_model()},
         {"disk_free", space_ok ? json(space.available) : json(nullptr)},
-        {"models", scan_models(snap.r.models_dir)},
+        {"models", models},
+        {"model_sizes", sizes},
         {"processes", processes()},
         {"binaries", {{"rpc_server", fs::exists(snap.r.rpc_server_bin, ec)},
                       {"llama_server", fs::exists(snap.r.llama_server_bin, ec)}}},
@@ -380,6 +385,8 @@ void Agent::setup_download_routes() {
             xgi::reply_json(res, 200, json{{"ok", true}});
         });
     });
+    // LAN copies (ADR-012): other nodes pull model files from this one.
+    model_server_->register_routes(s);
     s.Get("/hub/files", [this, guarded](const httplib::Request& req, httplib::Response& res) {
         guarded(res, [&] {
             auto src = xgi::hub::parse_source(req.get_param_value("source"));
